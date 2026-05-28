@@ -1,0 +1,24 @@
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# ── Data Validation ───────────────────────────────────────────────────────────
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# ── PDF Parsing ───────────────────────────────────────────────────────────────
+pypdf>=4.3.0                 # primary PDF text extractor (already installed)
+pdfplumber>=0.11.0           # enhanced table extraction (fallback / optional)
+pymupdf>=1.24.0              # fitz — fastest PDF renderer (optional upgrade)
+
+# ── Excel / Spreadsheet ───────────────────────────────────────────────────────
+openpyxl>=3.1.5
+pandas>=2.2.0
+xlrd>=2.0.1                  # legacy .xls support for pandas
+
+# ── Numerics ──────────────────────────────────────────────────────────────────
+numpy>=1.26.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
