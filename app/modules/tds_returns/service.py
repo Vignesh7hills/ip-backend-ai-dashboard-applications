@@ -19,19 +19,55 @@ class TDSReturnsService:
         self.generator = TDSReturnsExcelGenerator()
 
     def process(self, file_path: str, company_name: str = '') -> dict:
+        """Single-file convenience wrapper around process_multiple."""
+        return self.process_multiple([file_path], company_name=company_name)
+
+    def process_multiple(self, file_paths, company_name: str = '') -> dict:
+        """
+        Parse one OR many TDS input files and produce a SINGLE merged report.
+
+        Each file is parsed independently; entries from every file are tagged
+        with their own source_file / source_group (done by the parser). The
+        combined entry list is then validated, challan-numbered, and rendered
+        once — so multiple uploads collapse into one output workbook with
+        challan serials running sequentially across all files.
+        """
         t0 = time.perf_counter()
         logs = []
+        errors = []
+        warnings = []
 
         def log(msg):
             logger.info(msg)
             logs.append({'level': 'INFO', 'message': msg})
 
-        log("Step 1/4: Parsing TDS file")
-        entries = self.parser.parse_file(file_path)
-        log(f"Parsed {len(entries)} TDS entries")
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+
+        log(f"Step 1/4: Parsing {len(file_paths)} TDS file(s)")
+        entries = []
+        per_file = []
+        for fp in file_paths:
+            fname = fp.rsplit('/', 1)[-1]
+            try:
+                e = self.parser.parse_file(fp)
+            except Exception as exc:
+                warnings.append(f"[{fname}] could not be parsed: {exc}")
+                logger.warning("Failed to parse %s: %s", fname, exc)
+                continue
+            if not e:
+                warnings.append(f"[{fname}] no TDS rows detected")
+            entries.extend(e)
+            per_file.append((fname, len(e)))
+
+        for fname, n in per_file:
+            log(f"  {fname}: {n} entries")
+        log(f"Parsed {len(entries)} TDS entries from {len(per_file)} file(s)")
 
         log("Step 2/4: Validating")
-        is_valid, errors, warnings = self.validator.validate(entries)
+        is_valid, v_errors, v_warnings = self.validator.validate(entries)
+        errors.extend(v_errors)
+        warnings.extend(v_warnings)
 
         log("Step 3/4: Assigning challans & computing summaries")
         challan_groups = self.calculator.assign_challans(entries)

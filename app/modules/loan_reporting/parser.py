@@ -49,6 +49,7 @@ from app.core.exceptions import FileParseError, EmptyFileError
 logger = get_logger(__name__)
 
 # ─────────────────────────── regex helpers ───────────────────────────────────
+_NUM              = r'[\d,]+\.\d{2}'            # Indian/plain amount token
 _AMOUNT_ONLY_RE   = re.compile(r'^[\d,]+\.\d{2}$')
 _BALANCE_RE       = re.compile(r'^[\d,]+\.\d{2}\s*(Cr|Dr)?$|^-+$', re.IGNORECASE)
 _VOUCHER_NO_RE    = re.compile(r'^BK-\d+$|^\d{3,4}$')
@@ -291,233 +292,154 @@ class LedgerPDFParser:
 
     def parse_manmohan_pdf_direct(self, pdf_path: str) -> List[RawAccount]:
         """
-        Direct parser for MANMOHAN TEXTILES LOAN.pdf format.
-        The PDF text is highly concatenated — we use regex on the raw page text
-        instead of line-by-line processing.
+        Clean line-based parser for the MANMOHAN TEXTILES "Loans & Borrowings"
+        ledger format.
+
+        Layout (one logical row per line, columns space-separated):
+            DATE  PARTICULARS  [Dr Amount | Cr Amount]  BALANCE Cr/Dr
+
+        Because text extraction collapses the separate Dr / Cr amount columns
+        into a single amount token, the debit/credit direction of each row is
+        inferred from the change in running balance:
+            balance increased  -> credit entry  (Rec)
+            balance decreased  -> debit entry   (Pay)
+
+        Interest and TDS rows are tagged as journal entries (voucher_no='') so
+        they are excluded from loan-taken / loan-repaid principal totals while
+        still participating in balance-continuity and maximum-balance logic.
+
+        Account block ends at the "Cr/Dr Balance <amount>" + "TOTAL :" markers.
         """
-        from pypdf import PdfReader
-        reader = PdfReader(pdf_path)
-        full_text = ''
-        for page in reader.pages:
-            full_text += (page.extract_text() or '') + '\n'
+        lines = self._extract_manmohan_lines(pdf_path)
 
         accounts: List[RawAccount] = []
+        current: Optional[RawAccount] = None
+        prev_cr: float = 0.0
 
-        # Split into account blocks by 'TOTAL :' marker
-        # Each block: name → PAN → transactions → Sub Total → Cr/Dr Balance → TOTAL
-        # Account names appear as '. NAME' or just 'NAME' after 'TOTAL :'
-        # Strategy: find all account name + PAN sections
-
-        # Pattern: find account boundaries by looking for PAN lines
-        # Each account has a unique PAN (mostly), then transactions, then totals
-
-        # Step 1: Normalise text — remove page headers
-        text = re.sub(r'\|\|\s*SHREE\s*\|\|.*?BALANCE', '', full_text, flags=re.DOTALL)
-        text = re.sub(r'From\s*:.*?To\s*\d{2}/\d{2}/\d{4}', '', text)
-        text = re.sub(r'DATEPARTICULARS.*?BALANCE', '', text)
-        text = re.sub(r'DATEPARTICULARSDr\s+AMOUNTCr\s+AMOUNTBALANCE', '', text)
-        text = re.sub(r'Ledger\s+A/c\s+For\s+LOANS\s+[&A]\s+BORROWINGS', '', text)
-
-        # Step 2: Find each account block using PAN pattern as anchor
-        # Pattern to find account name + PAN pairs
-        _BLOCK_RE = re.compile(
-            r'(?:TOTAL\s*:[\s.]*)?'          # optional TOTAL : separator
-            r'([A-Z][A-Z\s./&()-]{3,60}?)'   # account name
-            r'PAN\s*No\.?\s*([A-Z]{5}\d{4}[A-Z])?',  # PAN (optional)
-            re.DOTALL
+        _DATE_RE = re.compile(r'^(\d{2}/\d{2}/\d{4})\s+(.*)$')
+        _BAL_RE = re.compile(r'(' + _NUM + r')\s+(Cr|Dr)\s*$', re.IGNORECASE)
+        _CLOSE_RE = re.compile(r'^(Cr|Dr)\s+Balance\s+(' + _NUM + r')', re.IGNORECASE)
+        _PAN_RE = re.compile(r'^PAN\s*No\.?\s*([A-Z]{5}\d{4}[A-Z])?', re.IGNORECASE)
+        _SKIP_RE = re.compile(
+            r'^\|\||^MANMOHAN|^SHREE|^From\s*:|^DATE\s+PARTICULARS'
+            r'|^Ch\.no\.|^Paid\s|^Page\b|^Sub\s+Total|^TOTAL\s*:|^\.+$|^$',
+            re.IGNORECASE,
         )
 
-        # Better approach: split on account name pattern
-        # Account names always precede 'PAN No.'
-        _ACCT_PAN_RE = re.compile(
-            r'([A-Z][A-Z\s\./&(),-]{2,60?}?)'
-            r'\s*PAN\s*No\.?\s*([A-Z]{5}\d{4}[A-Z])?',
-        )
-
-        # Step 3: Use a cleaner approach — find all "Opening Balance As On" occurrences
-        # Each account has exactly one Opening Balance entry
-        _OB_RE = re.compile(
-            r'(\d{2}/\d{2}/\d{4})\s+'      # date
-            r'(\d[\d,.]*\.\d{2})Cr'         # opening balance amount + Cr
-            r'(\d[\d,.]*\.\d{2})',           # running balance
-        )
-
-        # Extract all transactions grouped by looking for Sub Total markers
-        _ACCOUNT_BLOCK_RE = re.compile(
-            r'(?:(?:TOTAL\s*:\s*\.?\s*)|^)'
-            r'([A-Z][A-Z\s\./&(),-]{2,60}?)'     # account name
-            r'PAN\s*No\.?\s*([A-Z]{5}\d{4}[A-Z]|(?=Opening))'  # PAN
-            r'.*?'                                  # transactions
-            r'(?:Cr|Dr)\s+Balance\s*([\d,]+\.?\d*)',  # closing balance
-            re.DOTALL
-        )
-
-        # Since the text is hard to parse with regex, use a simpler sequential approach:
-        # Split text into segments at account-name boundaries
-        return self._parse_manmohan_direct_text(full_text)
-
-    def _parse_manmohan_direct_text(self, full_text: str) -> List[RawAccount]:
-        """
-        Parse concatenated MANMOHAN PDF text directly.
-        Uses the known structure of the LOAN.pdf to extract accounts.
-        """
-        from app.utils.amount_parser import parse_amount, cr_value
-
-        # Clean page headers from each page
-        # Page text starts with "|| SHREE ||MANMOHAN TEXTILES..." header
-        text = full_text
-
-        # Remove page headers (everything between || SHREE || and BALANCE on each page)
-        text = re.sub(
-            r'\|\|\s*SHREE\s*\|\|.*?DATEPARTICULARSDr\s*AMOUNTCr\s*AMOUNTBALANCE',
-            '', text, flags=re.DOTALL
-        )
-
-        accounts: List[RawAccount] = []
-
-        # Strategy: find all lender blocks by PAN pattern + surrounding context
-        # Each lender: NAME...PAN No. PANCODE...transactions...Sub Total...Cr Balance...TOTAL
-        _PAN_LINE_RE = re.compile(r'PAN\s*No\.?\s*([A-Z]{5}\d{4}[A-Z])?')
-
-        # Find all positions of PAN lines
-        pan_positions = [(m.start(), m.group(1) or '') for m in _PAN_LINE_RE.finditer(text)]
-
-        # For each PAN position, extract account name (text before it, after previous block end)
-        # and closing balance (text after it, before TOTAL :)
-        _TOTAL_RE = re.compile(r'TOTAL\s*:', re.IGNORECASE)
-        _CR_BAL_RE = re.compile(r'(?:Cr|Dr)\s+Balance\s+([\d,]+\.?\d*)', re.IGNORECASE)
-        _SUBTOTAL_RE = re.compile(r'Sub\s*\n*Total\s*:?\s*([\d,]+\.?\d*)', re.IGNORECASE)
-        _DATE_AMT_RE = re.compile(
-            r'(\d{2}/\d{2}/\d{4})\s+'
-            r'(?:([\d,]+\.\d{2})Cr([\d,]+\.\d{2})'   # Cr transaction
-            r'|([\d,]+\.\d{2})(?:Cr)?([\d,]+\.\d{2}))',  # Dr or Cr
-            re.IGNORECASE
-        )
-        _OPENING_RE = re.compile(
-            r'Opening Balance As On\s+\d{2}/\d{2}/\d{4}\s*'
-            r'(\d{2}/\d{2}/\d{4})\s+'
-            r'([\d,]+\.\d{2})Cr([\d,]+\.\d{2})',
-            re.IGNORECASE
-        )
-
-        # Find TOTAL: positions to split blocks
-        total_positions = [m.start() for m in _TOTAL_RE.finditer(text)]
-
-        # For each account between TOTAL markers (or start → first TOTAL)
-        block_starts = [0] + [p for p in total_positions]
-        block_ends   = total_positions + [len(text)]
-
-        for block_start, block_end in zip(block_starts, block_ends):
-            block = text[block_start:block_end]
-            if len(block.strip()) < 20:
-                continue
-
-            # Find PAN in this block
-            pan_m = _PAN_LINE_RE.search(block)
-            pan = (pan_m.group(1) or '') if pan_m else ''
-
-            # Account name: text before PAN or before first date
-            name_end = pan_m.start() if pan_m else len(block)
-            name_text = block[:name_end].strip()
-            # Clean: remove "TOTAL :. " prefix, dates, amounts
-            name_text = re.sub(r'^TOTAL\s*:[\s.]*', '', name_text, flags=re.IGNORECASE)
-            name_text = re.sub(r'\d{2}/\d{2}/\d{4}.*', '', name_text, flags=re.DOTALL)
-            name_text = name_text.strip().rstrip('.')
-
-            if not name_text or len(name_text) < 3:
-                continue
-
-            # Extract closing balance — look for 'Cr Balance AMOUNT' pattern
-            cr_bal_m = _CR_BAL_RE.search(block)
-            # Also try 'NUMBER Cr Balance' pattern which appears in this PDF
-            if not cr_bal_m:
-                cr_bal_m2 = re.search(r'([\d,]+\.\d{2})\s*\nCr\s+Balance', block)
-                closing_balance = parse_amount(cr_bal_m2.group(1)) if cr_bal_m2 else 0.0
-                closing_dir = 'Cr'
-            else:
-                closing_balance = parse_amount(cr_bal_m.group(1))
-                closing_dir = 'Cr' if block[cr_bal_m.start():cr_bal_m.start()+2].upper() == 'CR' else 'Dr'
-
-            # Better: get the first amount before 'Cr Balance' in the block
-            # The pattern is: "277000.00\nCr Balance 307000.00..."
-            # Or in concat text: "277000.00Cr Balance 307000.00"
-            cb_m2 = re.search(r'([\d,]+\.\d{2})(?:\n)?Cr\s+Balance', block, re.IGNORECASE)
-            if cb_m2:
-                closing_balance = parse_amount(cb_m2.group(1))
-                closing_dir = 'Cr'
-
-            # Extract sub total
-            sub_m = _SUBTOTAL_RE.search(block)
-
-            # Create account
-            acct = RawAccount(name=name_text)
-            acct.pan = pan
-            acct.closing_balance = closing_balance
-            acct.closing_direction = closing_dir
-
-            # Extract opening balance — first date line after PAN
-            ob_text = block[pan_m.end():] if pan_m else block
-            ob_m = re.search(
-                r'Opening Balance As On\s+\d{2}/\d{2}/\d{4}\s*'
-                r'(\d{2}/\d{2}/\d{4})\s+'
-                r'([\d,]+\.\d{2})Cr([\d,]+\.\d{2})',
-                ob_text, re.IGNORECASE
-            )
-            if ob_m:
-                opening_bal = parse_amount(ob_m.group(2))
-                acct.transactions.append(RawTransaction(
-                    date_str=ob_m.group(1),
-                    voucher_type='Opbl',
-                    voucher_no='',
-                    description='Opening Balance',
-                    narration='',
-                    amount=opening_bal,
-                    balance_str=f'{ob_m.group(3)}Cr',
-                    balance=parse_amount(ob_m.group(3)),
-                    balance_direction='Cr',
-                ))
-
-            # Extract all date transactions
-            # Pattern: DATE  AMOUNT Cr BALANCE  (or Dr)
-            for txn_m in re.finditer(
-                r'(\d{2}/\d{2}/\d{4})\s+([\d,]+\.\d{2})(?:Cr)?([\d,]+\.\d{2})',
-                ob_text
-            ):
-                date_str = txn_m.group(1)
-                amount   = parse_amount(txn_m.group(2))
-                balance  = parse_amount(txn_m.group(3))
-                # Determine if Cr or Dr based on context
-                after_match = ob_text[txn_m.start():txn_m.start()+50]
-                bal_dir = 'Cr'  # MANMOHAN loans are mostly Cr
-
-                # Infer voucher type from amount and balance change
-                # Opening balance already captured above
-                if 'Opening Balance' in ob_text[max(0,txn_m.start()-30):txn_m.start()]:
-                    continue  # already captured
-
-                acct.transactions.append(RawTransaction(
-                    date_str=date_str,
-                    voucher_type='Rec',  # bank receipt
-                    voucher_no='BK-1',
-                    description='',
-                    narration='',
-                    amount=amount,
-                    balance_str=f'{balance}Cr',
-                    balance=balance,
-                    balance_direction=bal_dir,
-                ))
-
-            # Filter: valid account name must not start with digits/amounts
-            if (name_text
-                    and len(name_text) >= 3
-                    and not re.match(r'^\d', name_text)
-                    and re.search(r'[A-Za-z]{2,}', name_text)
-                    and closing_balance >= 0):
+        def finalize(acct: Optional[RawAccount]):
+            if acct and acct.transactions and len(acct.name) >= 3 \
+                    and re.search(r'[A-Za-z]{2,}', acct.name):
                 accounts.append(acct)
-                logger.debug("MANMOHAN direct: %s PAN=%s closing=%.0f%s",
-                             name_text, pan, closing_balance, closing_dir)
 
+        for raw in lines:
+            ln = raw.strip()
+
+            # ── Closing balance line ─────────────────────────────────────────
+            cm = _CLOSE_RE.match(ln)
+            if cm and current is not None:
+                current.closing_direction = cm.group(1).capitalize()
+                current.closing_balance = parse_amount(cm.group(2))
+                continue
+
+            # ── End-of-account marker ────────────────────────────────────────
+            if re.match(r'^TOTAL\s*:', ln, re.IGNORECASE):
+                finalize(current)
+                current = None
+                prev_cr = 0.0
+                continue
+
+            # ── Transaction row ──────────────────────────────────────────────
+            dm = _DATE_RE.match(ln)
+            if dm and current is not None:
+                date_str = dm.group(1)
+                rest = dm.group(2)
+                bm = _BAL_RE.search(rest)
+                if not bm:
+                    continue
+                balance = parse_amount(bm.group(1))
+                bal_dir = bm.group(2).capitalize()
+                body = rest[:bm.start()].strip()
+
+                nums = re.findall(_NUM, body)
+                amount = parse_amount(nums[-1]) if nums else 0.0
+                desc = re.sub(_NUM, '', body).strip(' .')
+
+                cur_cr = cr_value(balance, bal_dir)
+                delta = cur_cr - prev_cr
+
+                if re.search(r'opening\s+balance', desc, re.IGNORECASE):
+                    v_type, v_no = 'Opbl', ''
+                    if amount == 0.0:
+                        amount = balance
+                    current.transactions.append(RawTransaction(
+                        date_str=date_str, voucher_type=v_type, voucher_no=v_no,
+                        description=desc or 'Opening Balance', narration='',
+                        amount=amount, balance_str=f'{bm.group(1)}{bal_dir}',
+                        balance=balance, balance_direction=bal_dir,
+                    ))
+                    prev_cr = cur_cr
+                    continue
+
+                # Interest / TDS -> journal (excluded from principal)
+                if re.search(r'interest', desc, re.IGNORECASE):
+                    v_type, v_no = 'Jrn', ''
+                elif re.search(r'\bt\.?\s*d\.?\s*s\b|tds', desc, re.IGNORECASE):
+                    v_type, v_no = 'Jrn', ''
+                else:
+                    # Bank principal: direction from balance movement
+                    if delta >= 0:
+                        v_type, v_no = 'Rec', 'BK-1'
+                    else:
+                        v_type, v_no = 'Pay', 'BK-1'
+
+                current.transactions.append(RawTransaction(
+                    date_str=date_str, voucher_type=v_type, voucher_no=v_no,
+                    description=desc, narration='',
+                    amount=amount, balance_str=f'{bm.group(1)}{bal_dir}',
+                    balance=balance, balance_direction=bal_dir,
+                ))
+                prev_cr = cur_cr
+                continue
+
+            # ── PAN line ─────────────────────────────────────────────────────
+            pm = _PAN_RE.match(ln)
+            if pm and current is not None:
+                current.pan = pm.group(1) or ''
+                continue
+
+            # ── Skip noise ───────────────────────────────────────────────────
+            if _SKIP_RE.match(ln) or _BAL_RE.search(ln):
+                continue
+
+            # ── Otherwise: a new account name ────────────────────────────────
+            if re.search(r'[A-Za-z]{3,}', ln) and not ln[0].isdigit():
+                finalize(current)
+                current = RawAccount(name=ln.strip(' .'))
+                prev_cr = 0.0
+                continue
+
+        finalize(current)
+        logger.info("MANMOHAN parser: %d accounts", len(accounts))
         return accounts
+
+    def _extract_manmohan_lines(self, pdf_path: str) -> List[str]:
+        """
+        Extract clean per-line text for the MANMOHAN format.
+        Prefers pdfplumber (preserves column spacing); falls back to pypdf.
+        """
+        out: List[str] = []
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    txt = page.extract_text() or ''
+                    out.extend(ln.rstrip() for ln in txt.split('\n'))
+            if out:
+                return out
+        except Exception as e:
+            logger.warning("pdfplumber extraction failed (%s); using pypdf", e)
+        # Fallback
+        return self._extract_lines(pdf_path)
 
     def _extract_lines(self, pdf_path: str) -> List[str]:
         """
