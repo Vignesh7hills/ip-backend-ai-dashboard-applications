@@ -27,6 +27,9 @@ _ALIASES: Dict[str, str] = {
     'capital':                         'CAPITAL',
     'net profit':                      'CAPITAL',
     'shree ganesh ji maharaj':         'CAPITAL',
+    # FIX: SHRI GANESHJI MAHARAJ (common Tally entry for proprietor share in profit)
+    'shri ganeshji maharaj':           'CAPITAL',
+    'ganeshji maharaj':                'CAPITAL',
 
     # Unsecured Loans
     'loans & borrowings':              'UNSECURED LOANS',
@@ -35,6 +38,9 @@ _ALIASES: Dict[str, str] = {
     'unsecured loans':                 'UNSECURED LOANS',
     'unsecured loan':                  'UNSECURED LOANS',
     'loan (liability)':                'UNSECURED LOANS',
+    # FIX: HDFC HOME LOAN is a personal loan = Unsecured Loan per CA requirement
+    'hdfc home loan':                  'UNSECURED LOANS',
+    'hdfc home loan a/c':              'UNSECURED LOANS',
 
     # Secured Loans / OD
     'secured loans':                   'SECURED LOANS',
@@ -63,6 +69,7 @@ _ALIASES: Dict[str, str] = {
     # Provisions / Duties & Taxes
     'provisions':                      'PROVISIONS',
     'duties and taxes':                'PROVISIONS',
+    # FIX: CURRENT LIABILITIES group in BS format maps to PROVISIONS (liability side)
     'current liabilities':             'PROVISIONS',
 
     # Fixed Assets
@@ -73,7 +80,7 @@ _ALIASES: Dict[str, str] = {
     'investments':                     'INVESTMENTS',
     'investment':                      'INVESTMENTS',
 
-    # Shares
+    # Shares — FIX: SHARES VSB A/C is a share investment = SHARES group
     'shares':                          'SHARES',
     'equity shares':                   'EQUITY SHARES',
 
@@ -84,11 +91,12 @@ _ALIASES: Dict[str, str] = {
     'loans & advances':                'LOANS AND ADVANCES (ASSETS)',
     'loans and advances':              'LOANS AND ADVANCES (ASSETS)',
     'loans and advances (assets)':     'LOANS AND ADVANCES (ASSETS)',
+    'loans and advances (assets)':     'LOANS AND ADVANCES (ASSETS)',
     'loans and advances (asset)':      'LOANS AND ADVANCES (ASSETS)',
     'loan (asset)':                    'LOANS AND ADVANCES (ASSETS)',
     'advances':                        'LOANS AND ADVANCES (ASSETS)',
 
-    # Cash & Bank
+    # Cash & Bank — FIX: BANK ACCOUNT group (used in UGARARAM BS) → CASH AND BANK
     'cash and bank':                   'CASH AND BANK',
     'cash & bank':                     'CASH AND BANK',
     'bank a/c':                        'CASH AND BANK',
@@ -98,7 +106,7 @@ _ALIASES: Dict[str, str] = {
     # Cash In Hand
     'cash in hand':                    'CASH IN HAND',
 
-    # Other Current Assets
+    # Other Current Assets — FIX: CURRENT ASSETS group (asset side) → OTHER CURRENT ASSETS
     'other current assets':            'OTHER CURRENT ASSETS',
     'current assets':                  'OTHER CURRENT ASSETS',
     'duties and taxes (asset)':        'OTHER CURRENT ASSETS',
@@ -112,7 +120,7 @@ _ALIASES: Dict[str, str] = {
     'stock in hand ( opening )':       'OPENING STOCK',
     'stock in hand (opening)':         'OPENING STOCK',
 
-    # Closing Stock — NOTE: usually excluded per rules, kept for pass-through
+    # Closing Stock — excluded by service layer per rules, kept for completeness
     'closing stock':                   'CLOSING STOCK',
     'stock in hand (closing)':         'CLOSING STOCK',
     'stock in hand ( closing )':       'CLOSING STOCK',
@@ -121,6 +129,7 @@ _ALIASES: Dict[str, str] = {
     'sales a/c':                       'SALES A/C',
     'sale a/c':                        'SALES A/C',
     'sales':                           'SALES A/C',
+    'sale account':                    'SALES A/C',
     'sale account':                    'SALES A/C',
 
     # Purchases
@@ -134,7 +143,7 @@ _ALIASES: Dict[str, str] = {
     # Direct Expenses (Manufacturing)
     'direct expenses (m)':             'DIRECT EXPENSES (M)',
     'direct expenses':                 'DIRECT EXPENSES (M)',
-    'direct expinditure':              'DIRECT EXPENSES (M)',   # typo in data
+    'direct expinditure':              'DIRECT EXPENSES (M)',
     'direct expenditure':              'DIRECT EXPENSES (M)',
 
     # Direct Incomes
@@ -178,7 +187,8 @@ _ALIASES: Dict[str, str] = {
 
 # Keyword-based fallback matching (substring checks)
 _KEYWORD_MAP = [
-    (['sarafi', 'family loan', 'personal loan', 'director loan', 'friend loan'],
+    (['sarafi', 'family loan', 'personal loan', 'director loan', 'friend loan',
+      'home loan'],
      'UNSECURED LOANS'),
     (['sundry creditor', 'karkhandar', 'broker'],
      'SUNDRY CREDITORS'),
@@ -204,18 +214,9 @@ _KEYWORD_MAP = [
      'PURCHASE A/C'),
     (['sale'],
      'SALES A/C'),
+    (['ganesh', 'ganeshji'],
+     'CAPITAL'),
 ]
-
-# Groups that are clearly PL/income-statement items — when a name from the raw data
-# appears here as a GROUP (not as an account), reclassify the sub-items accordingly.
-_PL_GROUP_PASSTHROUGH = {
-    'stock in hand ( opening )': 'DIRECT EXPENSES (M)',
-    'sale a/c':                  'CLOSING STOCK',
-    'direct expinditure':        'MANUFACTURING EXPENSES',
-    'manufacturing expenses':    'PURCHASE A/C',
-    'purchase a/c':              'INDIRECT EXPENSES',
-    'stock in hand (closing)':   'INDIRECT INCOMES',
-}
 
 
 def _normalise(raw: str) -> str:

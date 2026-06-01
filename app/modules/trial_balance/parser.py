@@ -58,7 +58,7 @@ _SKIP_ROW_KW = {
     'gross profit', 'net profit', 'net loss',
 }
 
-_DOTS_RE = re.compile(r'\s*\.{2,}\s*')
+_DOTS_RE = re.compile(r'(\s*\.\s*){2,}')
 # Pattern to extract trailing amount from "ACCOUNT NAME 123456.78"
 # Amount is always at end of line: optional paren/minus, digits, dot, 2 decimal places
 # Works with both single-space and multi-space separators (PDF uses single space).
@@ -228,6 +228,9 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
         return []
     hdr_row, ln_col, ls_col, lt_col, rn_col, rs_col, rt_col = result
 
+    # Detect P&L vs Balance Sheet for correct Dr/Cr assignment
+    is_pl = _is_pl_document(df, hdr_row)
+
     entries: List[TrialBalanceEntry] = []
     left_group = ''
     right_group = ''
@@ -238,7 +241,8 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
     for row_idx in range(hdr_row + 1, len(df)):
         row_raw = [str(c).strip() for c in df.iloc[row_idx]]
 
-        # ── Left side (Liabilities → Credit) ──────────────────────────────
+        # ── Left side ─────────────────────────────────────────────────────
+        # BS: Liabilities → Credit   |   P&L: Expenses → Debit
         left_name  = _clean(safe_col(row_raw, ln_col))
         left_sub   = parse_amount(safe_col(row_raw, ls_col))
         left_total = parse_amount(safe_col(row_raw, lt_col))
@@ -252,13 +256,22 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
             elif left_sub != 0.0:
                 amt = left_sub
                 e = TrialBalanceEntry(account_name=left_name, group=left_group)
-                if amt < 0:
-                    e.debit = abs(amt)
+                if is_pl:
+                    # P&L left = Debit (Expenses / Purchases)
+                    e.debit  = abs(amt) if amt < 0 else amt
+                    e.credit = 0.0
+                    if amt < 0:
+                        e.debit, e.credit = 0.0, abs(amt)
                 else:
-                    e.credit = amt
+                    # BS left = Credit (Liabilities)
+                    if amt < 0:
+                        e.debit = abs(amt)
+                    else:
+                        e.credit = amt
                 entries.append(e)
 
-        # ── Right side (Assets → Debit) ────────────────────────────────────
+        # ── Right side ────────────────────────────────────────────────────
+        # BS: Assets → Debit   |   P&L: Income → Credit
         right_name  = _clean(safe_col(row_raw, rn_col))
         right_sub   = parse_amount(safe_col(row_raw, rs_col))
         right_total = parse_amount(safe_col(row_raw, rt_col))
@@ -271,10 +284,18 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
             elif right_sub != 0.0:
                 amt = right_sub
                 e = TrialBalanceEntry(account_name=right_name, group=right_group)
-                if amt < 0:
-                    e.credit = abs(amt)
+                if is_pl:
+                    # P&L right = Credit (Income / Sales)
+                    if amt < 0:
+                        e.debit  = abs(amt)
+                    else:
+                        e.credit = amt
                 else:
-                    e.debit = amt
+                    # BS right = Debit (Assets)
+                    if amt < 0:
+                        e.credit = abs(amt)
+                    else:
+                        e.debit = amt
                 entries.append(e)
 
     return entries
@@ -328,6 +349,17 @@ def _find_particulars_header_row(df: pd.DataFrame) -> int:
     return -1
 
 
+def _is_pl_document(df: pd.DataFrame, hdr_row: int) -> bool:
+    """Return True if the document is a P&L / Trading account (not a Balance Sheet)."""
+    _PL_KW = ['profit', 'loss', 'trading', 'p & l', 'p&l', 'income', 'expenditure']
+    for ri in range(min(hdr_row, 15)):
+        row_text = ' '.join(str(c).lower().strip() for c in df.iloc[ri]
+                            if str(c).strip() not in ('nan', ''))
+        if any(kw in row_text for kw in _PL_KW):
+            return True
+    return False
+
+
 def _parse_particulars_two_column(df: pd.DataFrame) -> List[TrialBalanceEntry]:
     """
     Parse UMA TEXCOM two-column P&L / Balance Sheet XLS.
@@ -341,12 +373,17 @@ def _parse_particulars_two_column(df: pd.DataFrame) -> List[TrialBalanceEntry]:
       P&L Account:   group-total in col3, leaf-amount in col4
     We auto-detect by checking which column has amounts on indented (col1) rows.
 
-    Left side  → Credit (Liabilities/Expenses)
-    Right side → Debit  (Assets/Income)
+    SIDE ASSIGNMENT (critical):
+      Balance Sheet  → Left=Credit (Liabilities),  Right=Debit (Assets)
+      P&L / Trading  → Left=Debit  (Expenses),     Right=Credit (Income)
     """
     hdr_row = _find_particulars_header_row(df)
     if hdr_row < 0:
         return []
+
+    # Detect if this is a P&L document (left=Debit) or BS (left=Credit)
+    is_pl = _is_pl_document(df, hdr_row)
+    logger.debug("Format C: is_pl=%s (hdr_row=%d)", is_pl, hdr_row)
 
     def sv(row_vals, col):
         if 0 <= col < len(row_vals):
@@ -408,10 +445,18 @@ def _parse_particulars_two_column(df: pd.DataFrame) -> List[TrialBalanceEntry]:
 
         if l1 and not _is_skip(l1) and l_leaf != 0.0:
             e = TrialBalanceEntry(account_name=l1, group=left_group)
-            if l_leaf < 0:
-                e.debit  = abs(l_leaf)
+            if is_pl:
+                # P&L left side = Debit (Expenses / Purchases)
+                if l_leaf < 0:
+                    e.credit = abs(l_leaf)
+                else:
+                    e.debit = l_leaf
             else:
-                e.credit = l_leaf
+                # BS left side = Credit (Liabilities)
+                if l_leaf < 0:
+                    e.debit  = abs(l_leaf)
+                else:
+                    e.credit = l_leaf
             entries.append(e)
 
         # ── Right side ─────────────────────────────────────────────────────
@@ -428,10 +473,18 @@ def _parse_particulars_two_column(df: pd.DataFrame) -> List[TrialBalanceEntry]:
 
         if r6 and not _is_skip(r6) and r_leaf != 0.0:
             e = TrialBalanceEntry(account_name=r6, group=right_group)
-            if r_leaf < 0:
-                e.credit = abs(r_leaf)
+            if is_pl:
+                # P&L right side = Credit (Income / Sales)
+                if r_leaf < 0:
+                    e.debit  = abs(r_leaf)
+                else:
+                    e.credit = r_leaf
             else:
-                e.debit  = r_leaf
+                # BS right side = Debit (Assets)
+                if r_leaf < 0:
+                    e.credit = abs(r_leaf)
+                else:
+                    e.debit  = r_leaf
             entries.append(e)
 
     return entries

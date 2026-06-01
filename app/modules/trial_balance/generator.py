@@ -186,7 +186,6 @@ class TrialBalanceExcelGenerator:
             for ci, h in enumerate(['Particulars', 'Debit (Dr)', 'Credit (Cr)', 'Net'], 1):
                 _w(ws, r, ci, h, font=Font(name='Arial', bold=True, size=9),
                    fill=_HEADER_FILL if ci > 1 else None,
-                   font_=_HEADER_FONT if ci > 1 else Font(name='Arial', bold=True, size=9),
                    align=ctr if ci > 1 else lft)
             r += 1
 
