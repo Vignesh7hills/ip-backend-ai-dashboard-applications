@@ -19,25 +19,21 @@ _conf = ConnectionConfig(
 _mailer = FastMail(_conf)
 
 
-async def send_verification_email(email: str, token: str) -> None:
-    url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+async def send_verification_email(email: str, otp: str) -> None:
     body = f"""
-    <html><body>
-    <h2>Welcome to Diginnovators!</h2>
-    <p>Please verify your email address by clicking the button below:</p>
-    <a href="{url}" style="
-        display:inline-block;padding:12px 24px;
-        background:#6c47ff;color:#fff;
-        border-radius:8px;text-decoration:none;font-weight:600;">
-      Verify Email
-    </a>
-    <p style="margin-top:16px;color:#666;">
-      This link expires in 24 hours. If you did not create an account, ignore this email.
-    </p>
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:480px;margin:auto;background:#fff;border-radius:12px;padding:32px;">
+      <h2 style="color:#6c47ff;">Welcome to Diginnovators!</h2>
+      <p style="color:#444;">Use the OTP below to verify your email address:</p>
+      <div style="text-align:center;margin:24px 0;">
+        <span style="font-size:36px;font-weight:700;letter-spacing:10px;color:#6c47ff;">{otp}</span>
+      </div>
+      <p style="color:#888;font-size:13px;">This OTP expires in 10 minutes. Do not share it with anyone.</p>
+    </div>
     </body></html>
     """
     message = MessageSchema(
-        subject="Verify your Diginnovators account",
+        subject="Your Diginnovators verification OTP",
         recipients=[email],
         body=body,
         subtype=MessageType.html,
@@ -45,28 +41,24 @@ async def send_verification_email(email: str, token: str) -> None:
     try:
         await _mailer.send_message(message)
     except Exception as exc:
-        logger.error("Failed to send verification email to %s: %s", email, exc)
+        logger.error("Failed to send verification OTP to %s: %s", email, exc)
 
 
-async def send_reset_email(email: str, token: str) -> None:
-    url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+async def send_reset_email(email: str, otp: str) -> None:
     body = f"""
-    <html><body>
-    <h2>Reset Your Password</h2>
-    <p>Click the button below to set a new password for your Diginnovators account:</p>
-    <a href="{url}" style="
-        display:inline-block;padding:12px 24px;
-        background:#6c47ff;color:#fff;
-        border-radius:8px;text-decoration:none;font-weight:600;">
-      Reset Password
-    </a>
-    <p style="margin-top:16px;color:#666;">
-      This link expires in 1 hour. If you didn't request a reset, ignore this email.
-    </p>
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:480px;margin:auto;background:#fff;border-radius:12px;padding:32px;">
+      <h2 style="color:#6c47ff;">Reset Your Password</h2>
+      <p style="color:#444;">Use the OTP below to reset your Diginnovators password:</p>
+      <div style="text-align:center;margin:24px 0;">
+        <span style="font-size:36px;font-weight:700;letter-spacing:10px;color:#6c47ff;">{otp}</span>
+      </div>
+      <p style="color:#888;font-size:13px;">This OTP expires in 10 minutes. If you didn't request this, ignore this email.</p>
+    </div>
     </body></html>
     """
     message = MessageSchema(
-        subject="Reset your Diginnovators password",
+        subject="Your Diginnovators password reset OTP",
         recipients=[email],
         body=body,
         subtype=MessageType.html,
@@ -74,4 +66,4 @@ async def send_reset_email(email: str, token: str) -> None:
     try:
         await _mailer.send_message(message)
     except Exception as exc:
-        logger.error("Failed to send reset email to %s: %s", email, exc)
+        logger.error("Failed to send reset OTP to %s: %s", email, exc)
