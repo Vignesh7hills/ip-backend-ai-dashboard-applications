@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 from app.api.endpoints.loan_reporting import router as loan_router
 from app.api.endpoints.trial_balance import router as tb_router
 from app.api.endpoints.tds_returns import router as tds_router
+from app.api.endpoints.auth import router as auth_router
+from app.api.endpoints.users import router as users_router
 from app.core.config import settings
 from app.core.logger import get_logger
 
@@ -39,7 +41,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # Tighten in production
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=[
         "Content-Disposition",
@@ -54,6 +56,8 @@ app.add_middleware(
 app.include_router(loan_router, prefix="/api")
 app.include_router(tb_router, prefix="/api")
 app.include_router(tds_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(users_router, prefix="/api")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -69,7 +73,12 @@ async def health_check():
 # ── Global error handler ──────────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled exception: %s", exc)
+    import traceback
+    tb = traceback.format_exc()
+    logger.error(
+        "\n❌ UNHANDLED ERROR on %s %s\n%s",
+        request.method, request.url.path, tb
+    )
     return JSONResponse(
         status_code=500,
         content={"success": False, "error": "internal_error", "message": str(exc)},
@@ -81,6 +90,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     logger.info("=== %s v%s starting ===", settings.APP_NAME, settings.APP_VERSION)
     logger.info("Docs available at /docs")
+    from app.db.database import create_tables
+    await create_tables()
+    logger.info("PostgreSQL tables verified / created")
 
 
 if __name__ == "__main__":

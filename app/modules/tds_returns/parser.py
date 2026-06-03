@@ -133,10 +133,16 @@ class TDSReturnsParser:
             logger.info("Parsed %d entries (Vanshika format) from %s", len(entries), fname)
             return entries
 
+        entries = self._parse_jai_kanhaiya(df, fname)
+        if entries:
+            logger.info("Parsed %d entries (Jai Kanhaiya format) from %s", len(entries), fname)
+            return entries
+
         raise FileParseError(
             "Could not detect TDS columns. Expected:\n"
             "  PARTY NAME | % | PAN No | CR. AMOUNT | TDS AMT  (Shridhar)\n"
-            "  SR | PARTY NAME | PAN NO. | TDS % | CR. AMOUNT | TDS  (Vanshika)"
+            "  SR | PARTY NAME | PAN NO. | TDS % | CR. AMOUNT | TDS  (Vanshika)\n"
+            "  Sr. | Account Name | PAN | Applicable Amt. | TDS Amt. | Challan no.  (Jai Kanhaiya)"
         )
 
     # ── Vanshika TDS Register ─────────────────────────────────────────────────
@@ -393,6 +399,143 @@ class TDSReturnsParser:
             e.pan_valid = bool(_PAN_RE.match(pan)) if pan else False
             entries.append(e)
 
+        return entries
+
+
+    # ── Jai Kanhaiya / New Format ─────────────────────────────────────────────
+    # Structure:
+    #   R6:  Company name
+    #   R10: PAN  :  <pan>
+    #   R12: TDS (194Q) Purchase Details   ...   From : DD/MM/YYYY  To DD/MM/YYYY
+    #   R14: Sr. | Account Name | PAN | Applicable Amt. | TDS Amt. | Challan no.
+    #   R16: 1 | party | pan | amount | tds | challan   (every other row — sparse)
+    #   R20: '' | '' | Total | total_amt | total_tds | ''
+    #
+    # Key differences from Vanshika:
+    #   - "Account Name" instead of "Party Name"
+    #   - "Applicable Amt." instead of "CR. Amount"
+    #   - "TDS Amt." instead of "TDS" (exact)
+    #   - Section + date both on the same pre-header row
+    #   - No separate rate (%) column
+
+    def _parse_jai_kanhaiya(self, df: pd.DataFrame, fname: str) -> List[TDSEntry]:
+        header_row = -1
+        col_sr = col_name = col_pan = col_amt = col_tds = col_challan = -1
+
+        for ri in range(min(30, len(df))):
+            row = [str(c).lower().strip() for c in df.iloc[ri]]
+            has_name   = any('account name' in c or 'party name' in c for c in row)
+            has_tds    = any('tds amt' in c or 'tds amount' in c for c in row)
+            has_pan    = any(c == 'pan' or 'pan no' in c for c in row)
+            has_amount = any('applicable amt' in c or 'applicable amount' in c
+                             or 'amount' in c for c in row)
+            if has_name and has_tds and has_pan and has_amount:
+                for ci, c in enumerate(row):
+                    if c in ('sr', 'sr.') and col_sr < 0:            col_sr     = ci
+                    if ('account name' in c or 'party name' in c) and col_name < 0:
+                        col_name = ci
+                    if (c == 'pan' or 'pan no' in c) and col_pan < 0: col_pan    = ci
+                    if ('applicable amt' in c or 'applicable amount' in c) and col_amt < 0:
+                        col_amt = ci
+                    if ('tds amt' in c or 'tds amount' in c) and col_tds < 0:
+                        col_tds = ci
+                    if 'challan' in c and col_challan < 0:            col_challan = ci
+                if col_name >= 0 and col_amt >= 0 and col_tds >= 0:
+                    header_row = ri
+                    break
+
+        if header_row < 0:
+            return []
+
+        # Pre-scan all rows above header for section and date
+        current_section = 'UNKNOWN'
+        current_year = current_month = None
+
+        for ri in range(header_row):
+            row = list(df.iloc[ri])
+            row_str = ' '.join(str(c).strip() for c in row
+                               if str(c).strip() not in ('nan', '', 'None'))
+            if not row_str:
+                continue
+
+            # Section detection: "TDS (194Q) Purchase Details"
+            if re.search(r'\b194', row_str.upper()):
+                sec = _detect_section(row_str)
+                if sec != 'UNKNOWN':
+                    current_section = sec
+
+            # Date: "From : 01/03/2026  To 31/03/2026"
+            if 'from' in row_str.lower() or 'to' in row_str.lower():
+                # Collect all dates in the row and pick the latest (end date)
+                dates = [_parse_ym(str(c)) for c in row
+                         if _parse_ym(str(c)) is not None]
+                if not dates:
+                    # Also try the full row_str for "DD/MM/YYYY" patterns
+                    for m in re.finditer(r'(\d{2}/\d{2}/\d{4})', row_str):
+                        ym = _parse_ym(m.group(1))
+                        if ym:
+                            dates.append(ym)
+                if dates:
+                    current_year, current_month = max(dates, key=lambda x: (x[0], x[1]))
+
+        entries: List[TDSEntry] = []
+
+        for ri in range(header_row + 1, len(df)):
+            row = list(df.iloc[ri])
+            row_str = ' '.join(str(c).strip() for c in row
+                               if str(c).strip() not in ('nan', '', 'None'))
+            row_low = row_str.lower()
+
+            # Skip total rows
+            if 'total' in row_low:
+                continue
+
+            # Data row: sr column (or col 0) must be a digit
+            sr_val = _sv(row, col_sr) if col_sr >= 0 else _sv(row, 0)
+            if not sr_val.isdigit():
+                continue
+
+            name = _sv(row, col_name) if col_name >= 0 else ''
+            if not name or name.lower() in ('nan', ''):
+                continue
+            if any(kw in name.lower() for kw in ('total', 'summary')):
+                continue
+
+            pan = _sv(row, col_pan).upper() if col_pan >= 0 else ''
+            amt = parse_amount(_sv(row, col_amt)) if col_amt >= 0 else 0.0
+            tds = parse_amount(_sv(row, col_tds)) if col_tds >= 0 else 0.0
+
+            if amt == 0.0 and tds == 0.0:
+                continue
+
+            # Infer rate from amount and TDS (tds / amt * 100)
+            rate = round(tds / amt * 100, 4) if amt > 0 and tds > 0 else 0.0
+
+            pay_date = (_last_day(current_year, current_month)
+                        if current_year and current_month else '')
+
+            section = current_section
+            # Fallback from filename
+            if section == 'UNKNOWN':
+                if '94q' in fname.lower():
+                    section = '194Q'
+                elif '94c' in fname.lower():
+                    section = '194C'
+                elif '94a' in fname.lower():
+                    section = '194A'
+
+            e = TDSEntry(
+                deductee_name=name, pan=pan, section=section,
+                amount_paid=amt, tds_deducted=tds, rate=rate,
+                payment_date_str=pay_date, source_file=fname,
+                source_group=f"{section}_{fname}",
+            )
+            e.pan_valid = bool(_PAN_RE.match(pan)) if pan else False
+            entries.append(e)
+
+        if entries:
+            logger.info("Parsed %d entries (Jai Kanhaiya format) from %s",
+                        len(entries), fname)
         return entries
 
     def _pdf_to_dataframe(self, file_path: str) -> pd.DataFrame:
