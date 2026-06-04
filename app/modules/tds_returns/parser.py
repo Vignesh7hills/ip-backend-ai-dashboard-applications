@@ -278,17 +278,31 @@ def _sv(row: list, col: int) -> str:
 def _find_col(header_lower: List[str], aliases: List[str]) -> int:
     """
     Return the first column index that matches any alias.
-    Aliases are tried in order (most-specific first), so the first match wins.
-    Matching: alias is a substring of header cell OR header cell is a substring
-    of alias — handles abbreviations in both directions.
+    Aliases are tried most-specific first.
+
+    Two-pass matching prevents weaker substring matches from stealing
+    columns that belong to more-specific aliases.
+    E.g. 'tds amount' must not match col 'amount' before it finds col 'tds amount'.
+
+    Pass 1 (strong): alias == h  OR  alias in h  (alias is substring of header)
+    Pass 2 (weak):   h in alias                   (header is substring of alias)
     """
+    # Pass 1: exact match or alias contained in header cell
     for alias in aliases:
         for ci, h in enumerate(header_lower):
             if not h:
                 continue
-            if alias == h or alias in h or h in alias:
+            if alias == h or alias in h:
+                return ci
+    # Pass 2: header cell contained in alias (weak — only if nothing found above)
+    for alias in aliases:
+        for ci, h in enumerate(header_lower):
+            if not h:
+                continue
+            if h in alias:
                 return ci
     return -1
+
 
 
 # ── Header-row detector ────────────────────────────────────────────────────────
@@ -337,6 +351,36 @@ def _detect_header_row(df: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
         #    Reset col_tds so TDS amount gets computed as amt * rate / 100 later.
         if col_tds >= 0 and col_rate >= 0 and col_tds == col_rate:
             col_tds = -1
+
+        # 3. Validate col_amt against first data row.
+        #    If the value in that column looks like a date (not a number),
+        #    it is actually the date column — reassign and re-scan for the
+        #    real amount column in the remaining numeric columns.
+        first_data_row = ri + 1
+        if col_amt >= 0 and first_data_row < len(df):
+            sample = str(df.iloc[first_data_row, col_amt]).strip()
+            if re.search(r'\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}\.\d{2}\.\d{4}', sample):
+                # col_amt is really the date column
+                if col_date < 0:
+                    col_date = col_amt
+                # Re-scan for amount: first numeric column that isn't col_date/col_pan/col_name
+                # Note: col_rate is NOT in reserved — some files put amount under "TDS Rate %" header
+                reserved = {col_name, col_pan, col_date, col_tds, col_sr, col_challan}
+                col_amt = -1
+                for ci2 in range(len(row_raw)):
+                    if ci2 in reserved:
+                        continue
+                    sample2 = str(df.iloc[first_data_row, ci2]).strip()
+                    try:
+                        v = float(sample2.replace(',', ''))
+                        if v > 100:   # amounts are typically > 100
+                            col_amt = ci2
+                            break
+                    except ValueError:
+                        pass
+                # If col_amt grabbed what was col_rate, clear col_rate to avoid confusion
+                if col_amt >= 0 and col_amt == col_rate:
+                    col_rate = -1
 
         # Minimum required: name + (amt or rate) + (tds or rate)
         has_name   = col_name >= 0
