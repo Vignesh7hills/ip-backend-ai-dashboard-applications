@@ -90,7 +90,8 @@ _DATE_ALIASES = [
 _CHALLAN_ALIASES = ['challan no.', 'challan no', 'challan number', 'challan']
 
 # SR column
-_SR_ALIASES = ['sr.', 'sr', 's.no.', 's.no', 'sno', 'no.', 'no']
+# SR aliases — exact match only (substring match would catch 'PAN No', 'Challan No' etc.)
+_SR_ALIASES = ['sr.', 'sr', 's.no.', 's.no', 'sno', 's. no.', 's. no', '#']
 
 # ── Type-value → TDS section mapping ──────────────────────────────────────────
 _TYPE_SECTION: Dict[str, str] = {
@@ -220,7 +221,12 @@ def _detect_header_row(df: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
         col_amt     = _find_col(row_low, _AMT_ALIASES)
         col_type    = _find_col(row_low, _TYPE_ALIASES)
         col_date    = _find_col(row_low, _DATE_ALIASES)
-        col_sr      = _find_col(row_low, _SR_ALIASES)
+        # SR column: exact match only — 'no' must not match 'pan no' or 'challan no'
+        col_sr = next(
+            (ci for ci, h in enumerate(row_low)
+             if h in {'sr.', 'sr', 's.no.', 's.no', 'sno', 's. no.', 's. no', '#'}),
+            -1,
+        )
         col_challan = _find_col(row_low, _CHALLAN_ALIASES)
 
         # Collision resolution:
@@ -319,9 +325,8 @@ class TDSEntry:
     tds_shortfall: float = 0.0
     source_file: str = ''
     source_group: str = ''
-    # Actual bank challan number from source file (e.g. 45873).
-    # Distinct from challan_serial which is the Form 26Q sequential number.
-    bank_challan_no: str = ''
+    bank_challan_no: str = ''   # actual challan no. from source (e.g. 23, 234)
+
 
 
 class TDSReturnsParser:
@@ -481,15 +486,13 @@ class TDSReturnsParser:
             if not pay_date and current_year and current_month:
                 pay_date = _last_day(current_year, current_month)
 
-            # ── Actual bank challan number from source file (optional) ──────
+            # ── Challan number from source file ────────────────────────────
             bank_challan = _sv(row, col_challan) if col_challan >= 0 else ''
-            # Normalise: strip decimals added by Excel (45873.0 → 45873)
             if bank_challan and bank_challan.replace('.', '').isdigit():
                 bank_challan = str(int(float(bank_challan)))
 
-            # ── Build source_group: use bank_challan_no when present ────────
-            # Entries sharing the same bank challan belong to the same payment
-            # and must be grouped under one challan serial in Form 26Q.
+            # ── source_group: include challan no. so each unique challan
+            #    gets its own Challan Serial No. in Form 26Q output ──────
             if bank_challan:
                 grp_key = f"{section}_{bank_challan}_{fname}"
             else:

@@ -1,7 +1,7 @@
 """
 Excel generator for TDS Returns — Form 26Q format.
 
-Output sheet 'Annex-I_DeducteeDetails' exactly matches the desired output:
+Output sheet 'Annex-I_DeducteeDetails' columns:
   Col A: Challan Serial No.
   Col B: Section Code
   Col C: Permanent Account Number (PAN) of deductee
@@ -12,6 +12,7 @@ Output sheet 'Annex-I_DeducteeDetails' exactly matches the desired output:
   Col H: Amount of Tax deducted
   Col I: Total Tax Deposited
   Col J: Date on which tax deducted
+  Col K: Challan No.  (source challan number from input file)
 
 Also produces a Summary sheet with section-wise totals and
 a Challan-wise breakdown.
@@ -99,8 +100,8 @@ class TDSReturnsExcelGenerator:
             c.border = _BORDER
             ws.column_dimensions[get_column_letter(ci)].width = width
         ws.row_dimensions[1].height = 30
-        # Col 11: Bank Challan No. (source reference, not a Form 26Q field)
-        c11 = ws.cell(row=1, column=11, value='Bank Challan No. (Source)')
+        # Col 11: Challan No. — the actual bank challan number from the input file
+        c11 = ws.cell(row=1, column=11, value='Challan No.')
         c11.font = _HDR_FONT
         c11.fill = _HDR_FILL
         c11.alignment = ctr
@@ -125,11 +126,13 @@ class TDSReturnsExcelGenerator:
                     entry.tds_deducted,     # Total Tax Deposited = Amount of Tax deducted
                     entry.payment_date_str, # Date tax deducted = same as payment date
                 ]
-                # Write bank challan no. (from source file) into col 11 if present
-                # Col 10 is unused per Form26Q spec; we use it to carry source challan ref.
+                # Col 11: Challan No. from source file
                 bank_ch = getattr(entry, 'bank_challan_no', '')
-                if bank_ch:
-                    ws.cell(row=r, column=11, value=bank_ch).font = _DATA_FONT
+                c11 = ws.cell(row=r, column=11, value=bank_ch if bank_ch else None)
+                c11.font = _DATA_FONT
+                c11.border = _BORDER
+                c11.alignment = Alignment(horizontal='center', vertical='center')
+                if fill: c11.fill = fill
 
                 for ci, val in enumerate(row_vals, 1):
                     c = ws.cell(row=r, column=ci, value=val)
