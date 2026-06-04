@@ -146,16 +146,41 @@ _TYPE_SECTION: Dict[str, str] = {
     'house rent':               '194I(b)',
     'rental':                   '194I(b)',
     'rent':                     '194I(b)',
+
+    # Additional real-world variants
+    'salary':                   '192',
+    'salaries':                 '192',
+    'dividend':                 '194',
+    'lottery':                  '194B',
+    'winnings':                 '194B',
+    'transport':                '94C',     # transporter treated as contractor
+    'freight':                  '94C',
+    'clearing and forwarding':  '94C',
+    'c&f':                      '94C',
+    'insurance commission':     '94H',
+    'advertising':              '94C',
 }
 
 # ── Rate → section fallback ────────────────────────────────────────────────────
 def _rate_to_section(rate: float) -> str:
-    """Infer section code from TDS rate as a last-resort fallback."""
-    if rate in (1.0, 2.0):  return '94C'     # Contractor
-    if rate == 10.0:        return '94J'     # Professional (most common at 10%)
-    if rate == 0.1:         return '94Q'     # Purchase of Goods
-    if rate == 5.0:         return '94A'     # Interest
-    if rate == 2.0:         return '94H'     # Commission (also 2% sometimes)
+    """
+    Infer TDS section code from rate — used only when no type/section column exists.
+    Rates that map to a single section unambiguously are returned directly.
+    Ambiguous rates (shared by multiple sections) return '[REVIEW SECTION]'.
+
+    Standard TDS rates (Income Tax Act 1961):
+      0.1% → 94Q   Purchase of Goods           (unique)
+      1.0% → 94C   Contractor individual/HUF   (unique)
+      2.0% → ambiguous: 94C (contractor company) OR 194I(a) (rent plant)
+      5.0% → 94H   Commission/Brokerage        (unique)
+      10%  → ambiguous: 94J (professional) OR 94A (interest) OR 194I(b) (rent land)
+    """
+    if rate == 0.1:  return '94Q'              # Purchase of Goods — unique
+    if rate == 1.0:  return '94C'              # Contractor individual/HUF — unique
+    if rate == 5.0:  return '94H'              # Commission/Brokerage — unique
+    # Ambiguous rates — cannot determine section from rate alone
+    if rate == 2.0:  return '[REVIEW SECTION]' # 94C or 194I(a)
+    if rate == 10.0: return '[REVIEW SECTION]' # 94J or 94A or 194I(b)
     return 'UNKNOWN'
 
 
@@ -203,29 +228,44 @@ def _detect_section(text: str) -> str:
                    '194J': '94J', '194Q': '94Q'}
         return mapping.get(code, code)
 
-    # Keyword-based fallback
-    if 'PROFESSIONAL' in t or 'TECHNICAL' in t: return '94J'
-    if 'INTEREST'     in t:                     return '94A'
-    if 'PURCHASE'     in t:                     return '94Q'
-    if 'COMMISSION'   in t or 'BROKERAGE' in t: return '94H'
-    if 'CONTRACT'     in t:                     return '94C'
+    # Keyword-based fallback — ordered most-specific to least-specific
+    if 'PROFESSIONAL' in t or 'TECHNICAL SERVICE' in t: return '94J'
+    if 'INTEREST'     in t:                              return '94A'
+    if 'COMMISSION'   in t or 'BROKERAGE' in t:         return '94H'
+    if 'PURCHASE'     in t or 'GOODS'     in t:         return '94Q'
+    if 'CONTRACT'     in t or 'CONTRACTOR' in t:        return '94C'
     if any(k in t for k in ('RENT', 'RENTAL')):
         if any(k in t for k in ('PLANT', 'MACHINERY', 'EQUIPMENT')): return '194I(a)'
         return '194I(b)'
+    if 'SALARY' in t or 'SALARIES' in t:                return '192'
+    if 'DIVIDEND' in t:                                  return '194'
+    if 'LOTTERY' in t or 'WINNINGS' in t:               return '194B'
     return 'UNKNOWN'
 
 
 def _type_value_to_section(type_val: str) -> str:
-    """Infer TDS section from a "Type / Nature of Payment" cell value."""
+    """
+    Infer TDS section from a 'Type / Nature of Payment' cell value.
+    Returns '[REVIEW SECTION]' when the type is present but ambiguous,
+    or 'UNKNOWN' when no match is found at all.
+    """
     t = type_val.lower().strip()
-    # Direct code e.g. "194J"
+    if not t:
+        return 'UNKNOWN'
+
+    # 1. Try direct code detection (e.g. cell contains '94J', '194I(a)')
     sec = _detect_section(type_val)
-    if sec != 'UNKNOWN':
+    if sec not in ('UNKNOWN', '[REVIEW SECTION]'):
         return sec
-    for keyword, section in _TYPE_SECTION.items():
+
+    # 2. Try keyword table (most-specific match wins)
+    #    Iterate in order so longer/more-specific keys match before shorter ones
+    for keyword in sorted(_TYPE_SECTION.keys(), key=len, reverse=True):
         if keyword in t:
-            return section
-    return 'UNKNOWN'
+            return _TYPE_SECTION[keyword]
+
+    # 3. Nothing matched — flag for manual review
+    return '[REVIEW SECTION]'
 
 
 def _sv(row: list, col: int) -> str:
