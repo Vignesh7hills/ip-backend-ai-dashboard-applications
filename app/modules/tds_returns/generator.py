@@ -40,6 +40,7 @@ _BORDER     = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _AMT_FMT    = '#,##0.00'
 
 # Exact column headers matching desired output
+# Col 11 carries the source bank challan number (reference only — not a Form 26Q field)
 _FORM26Q_HEADERS = [
     ('Challan Serial No.',                          8),
     ('Section Code',                               12),
@@ -98,6 +99,12 @@ class TDSReturnsExcelGenerator:
             c.border = _BORDER
             ws.column_dimensions[get_column_letter(ci)].width = width
         ws.row_dimensions[1].height = 30
+        # Col 11: Bank Challan No. (source reference, not a Form 26Q field)
+        c11 = ws.cell(row=1, column=11, value='Bank Challan No. (Source)')
+        c11.font = _HDR_FONT
+        c11.fill = _HDR_FILL
+        c11.alignment = ctr
+        ws.column_dimensions['K'].width = 20
 
         r = 2
         alt = False
@@ -115,9 +122,14 @@ class TDSReturnsExcelGenerator:
                     entry.payment_date_str,
                     entry.rate if entry.rate > 0 else None,
                     entry.tds_deducted,
-                    entry.tds_deducted,    # Total Tax Deposited = Amount of Tax deducted
+                    entry.tds_deducted,     # Total Tax Deposited = Amount of Tax deducted
                     entry.payment_date_str, # Date tax deducted = same as payment date
                 ]
+                # Write bank challan no. (from source file) into col 11 if present
+                # Col 10 is unused per Form26Q spec; we use it to carry source challan ref.
+                bank_ch = getattr(entry, 'bank_challan_no', '')
+                if bank_ch:
+                    ws.cell(row=r, column=11, value=bank_ch).font = _DATA_FONT
 
                 for ci, val in enumerate(row_vals, 1):
                     c = ws.cell(row=r, column=ci, value=val)
