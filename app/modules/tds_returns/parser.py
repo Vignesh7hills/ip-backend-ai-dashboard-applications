@@ -95,33 +95,67 @@ _SR_ALIASES = ['sr.', 'sr', 's.no.', 's.no', 'sno', 's. no.', 's. no', '#']
 
 # ── Type-value → TDS section mapping ──────────────────────────────────────────
 _TYPE_SECTION: Dict[str, str] = {
-    'professional fees':    '194J',
-    'professional':         '194J',
-    'technical fees':       '194J',
-    'contract':             '194C',
-    'contractor':           '194C',
-    'sub-contractor':       '194C',
-    'sub contractor':       '194C',
-    'works contract':       '194C',
-    'purchase':             '194Q',
-    'goods':                '194Q',
-    'interest':             '194A',
-    'interest on loan':     '194A',
-    'interest on fd':       '194A',
-    'rent':                 '194I',
-    'rent of plant':        '194I',
-    'commission':           '194H',
-    'brokerage':            '194H',
-    'salary':               '192',
-    'dividend':             '194',
+    # Professional / Technical Fees → 94J
+    'professional fees':        '94J',
+    'professional':             '94J',
+    'technical fees':           '94J',
+    'technical service':        '94J',
+
+    # Contractor / Sub-contractor → 94C
+    'contract':                 '94C',
+    'contractor':               '94C',
+    'sub-contractor':           '94C',
+    'sub contractor':           '94C',
+    'works contract':           '94C',
+    'labour contract':          '94C',
+    'job work':                 '94C',
+
+    # Purchase of Goods → 94Q
+    'purchase of goods':        '94Q',
+    'purchase':                 '94Q',
+    'goods':                    '94Q',
+    'tds on purchase':          '94Q',
+
+    # Interest (other than securities) → 94A
+    'interest':                 '94A',
+    'interest on loan':         '94A',
+    'interest on fd':           '94A',
+    'interest on deposit':      '94A',
+
+    # Commission / Brokerage → 94H
+    'commission':               '94H',
+    'brokerage':                '94H',
+    'commission and brokerage': '94H',
+
+    # Rent — Plant/Machinery → 194I(a)
+    'rent of plant':            '194I(a)',
+    'rent plant':               '194I(a)',
+    'rent machinery':           '194I(a)',
+    'rent of machinery':        '194I(a)',
+    'rent of equipment':        '194I(a)',
+    'plant rent':               '194I(a)',
+    'machinery rent':           '194I(a)',
+
+    # Rent — Land/Building → 194I(b)
+    'rent of land':             '194I(b)',
+    'rent of building':         '194I(b)',
+    'rent land':                '194I(b)',
+    'rent building':            '194I(b)',
+    'office rent':              '194I(b)',
+    'shop rent':                '194I(b)',
+    'house rent':               '194I(b)',
+    'rental':                   '194I(b)',
+    'rent':                     '194I(b)',
 }
 
 # ── Rate → section fallback ────────────────────────────────────────────────────
 def _rate_to_section(rate: float) -> str:
-    if rate == 10.0:  return '194A'    # interest / professional
-    if rate in (1.0, 2.0): return '194C'
-    if rate == 0.1:   return '194Q'
-    if rate == 5.0:   return '194I'    # rent
+    """Infer section code from TDS rate as a last-resort fallback."""
+    if rate in (1.0, 2.0):  return '94C'     # Contractor
+    if rate == 10.0:        return '94J'     # Professional (most common at 10%)
+    if rate == 0.1:         return '94Q'     # Purchase of Goods
+    if rate == 5.0:         return '94A'     # Interest
+    if rate == 2.0:         return '94H'     # Commission (also 2% sometimes)
     return 'UNKNOWN'
 
 
@@ -141,23 +175,43 @@ def _parse_ym(text: str) -> Optional[Tuple[int, int]]:
 
 
 def _detect_section(text: str) -> str:
+    """
+    Extract TDS section code from a text string (header row, inline section label etc).
+    Returns the exact code as used in Form 26Q: 94C, 94A, 94H, 94J, 94Q, 194I(a), 194I(b).
+    """
     t = text.upper()
-    m = re.search(r'\b(194\s*[A-Z]?[A-Z]?)\b', t)
+
+    # Explicit 194I(a) / 194I(b) — check before generic 194I
+    if re.search(r'194\s*I\s*\(\s*A\s*\)', t): return '194I(a)'
+    if re.search(r'194\s*I\s*\(\s*B\s*\)', t): return '194I(b)'
+    if re.search(r'194\s*I\b', t):
+        # Determine sub-type from context
+        if any(k in t for k in ('PLANT', 'MACHINERY', 'EQUIPMENT')):
+            return '194I(a)'
+        return '194I(b)'  # default to land/building
+
+    # Explicit 94x codes in the text (e.g. "TDS (94Q) Purchase Details")
+    m = re.search(r'\b(94\s*[A-Z])\b', t)
     if m:
-        return m.group(1).replace(' ', '')
-    m = re.search(r'\b94\s*([A-Z])\b', t)
+        return m.group(1).replace(' ', '')   # e.g. "94C", "94Q"
+
+    # Full 194x codes in the text
+    m = re.search(r'\b(194\s*[A-Z])\b', t)
     if m:
-        return '194' + m.group(1)
-    if re.search(r'\b194\b', t):
-        if 'INTEREST'     in t: return '194A'
-        if 'CONTRACT'     in t: return '194C'
-        if 'PURCHASE'     in t: return '194Q'
-        if 'PROFESSIONAL' in t: return '194J'
-        return '194C'
-    if 'INTEREST'     in t: return '194A'
-    if 'CONTRACT'     in t: return '194C'
-    if 'PROFESSIONAL' in t: return '194J'
-    if 'PURCHASE'     in t: return '194Q'
+        code = m.group(1).replace(' ', '')   # e.g. "194C" → map to "94C"
+        mapping = {'194A': '94A', '194C': '94C', '194H': '94H',
+                   '194J': '94J', '194Q': '94Q'}
+        return mapping.get(code, code)
+
+    # Keyword-based fallback
+    if 'PROFESSIONAL' in t or 'TECHNICAL' in t: return '94J'
+    if 'INTEREST'     in t:                     return '94A'
+    if 'PURCHASE'     in t:                     return '94Q'
+    if 'COMMISSION'   in t or 'BROKERAGE' in t: return '94H'
+    if 'CONTRACT'     in t:                     return '94C'
+    if any(k in t for k in ('RENT', 'RENTAL')):
+        if any(k in t for k in ('PLANT', 'MACHINERY', 'EQUIPMENT')): return '194I(a)'
+        return '194I(b)'
     return 'UNKNOWN'
 
 
@@ -301,10 +355,11 @@ def _scan_pre_header(df: pd.DataFrame, header_row: int,
     # Fallback: infer section from filename
     if section == 'UNKNOWN':
         fl = fname.lower()
-        if '94q' in fl: section = '194Q'
-        elif '94c' in fl: section = '194C'
-        elif '94a' in fl: section = '194A'
-        elif '94j' in fl: section = '194J'
+        if '94q' in fl:    section = '94Q'
+        elif '94c' in fl:  section = '94C'
+        elif '94a' in fl:  section = '94A'
+        elif '94j' in fl:  section = '94J'
+        elif '94h' in fl:  section = '94H'
 
     return section, year, month
 
