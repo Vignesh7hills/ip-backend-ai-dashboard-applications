@@ -633,6 +633,95 @@ def _parse_tally_two_col_pdf(pdf_path: str) -> List[TrialBalanceEntry]:
     return entries
 
 
+
+# ── Format F: Flat single-column "Name - Debit/Credit Amount" ──────────────────
+# Handles any text-based list format regardless of PDF layout:
+#   "Cash in Hand - Debit 50,000"
+#   "Sales - Credit 800,000"
+#   "Capital Account   Credit   950,000"
+#   "SBI Bank 150,000 Dr"
+
+_FLAT_PATTERNS = [
+    # "Name - Debit 50,000" or "Name - Credit 800,000"
+    re.compile(r'^(.+?)\s*[-–]\s*(debit|credit)\s+([\d,]+\.?\d*)$', re.IGNORECASE),
+    # "Name  Debit  50,000" (2+ spaces)
+    re.compile(r'^(.+?)\s{2,}(debit|credit)\s+([\d,]+\.?\d*)$', re.IGNORECASE),
+    # "Name 50,000 Dr"
+    re.compile(r'^(.+?)\s+([\d,]+\.?\d*)\s*(dr|cr)\.?$', re.IGNORECASE),
+    # "Name Dr 50,000"
+    re.compile(r'^(.+?)\s+(dr|cr)\.?\s+([\d,]+\.?\d*)$', re.IGNORECASE),
+    # "Name (Dr) 50,000"
+    re.compile(r'^(.+?)\s+\((dr|cr)\)\s+([\d,]+\.?\d*)$', re.IGNORECASE),
+]
+
+_FLAT_SKIP = re.compile(
+    r'^(sample|test|trial balance|balance sheet|profit|loss|particulars|'
+    r'sr\s*no|sl\s*no|s\.no|account\s*name|ledger|opening|closing|'
+    r'total|grand total|prepared|date|for the|statement)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_flat_line_format(text: str) -> bool:
+    """Return True if text contains flat Debit/Credit line entries."""
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    matches = 0
+    for line in lines[:30]:
+        for pat in _FLAT_PATTERNS:
+            if pat.match(line):
+                matches += 1
+                break
+    return matches >= 3
+
+
+def _parse_flat_line_text(text: str) -> List[TrialBalanceEntry]:
+    """Parse flat "Name - Debit/Credit Amount" text into TrialBalanceEntry list."""
+    entries = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line or len(line) < 5:
+            continue
+        if _FLAT_SKIP.match(line):
+            continue
+
+        for i, pat in enumerate(_FLAT_PATTERNS):
+            m = pat.match(line)
+            if not m:
+                continue
+
+            if i in (0, 1):
+                name      = m.group(1).strip().rstrip('-').strip()
+                dc        = m.group(2).lower()
+                amt_str   = m.group(3)
+                direction = 'dr' if dc.startswith('d') else 'cr'
+                amount    = parse_amount(amt_str)
+            elif i == 2:
+                name      = m.group(1).strip()
+                amount    = parse_amount(m.group(2))
+                direction = 'dr' if m.group(3).lower().startswith('d') else 'cr'
+            else:  # i in (3, 4)
+                name      = m.group(1).strip()
+                direction = 'dr' if m.group(2).lower().startswith('d') else 'cr'
+                amount    = parse_amount(m.group(3))
+
+            if not name or amount <= 0:
+                break
+            if _FLAT_SKIP.match(name):
+                break
+            if len(name) < 2:
+                break
+
+            e = TrialBalanceEntry(account_name=name, group='')
+            if direction == 'dr':
+                e.debit  = amount
+            else:
+                e.credit = amount
+            entries.append(e)
+            break
+
+    return entries
+
+
 # ── Main parser ───────────────────────────────────────────────────────────────
 
 class TrialBalanceParser:
@@ -740,6 +829,19 @@ class TrialBalanceParser:
 
     def _parse_pdf(self, file_path: str) -> List[TrialBalanceEntry]:
         import pdfplumber
+
+        # ── Try Format F: Flat single-column "Name - Debit/Credit Amount" ────────
+        try:
+            import pdfplumber as _ppl
+            with _ppl.open(file_path) as _pdf:
+                _text = '\n'.join(p.extract_text() or '' for p in _pdf.pages)
+            if _is_flat_line_format(_text):
+                f_entries = _parse_flat_line_text(_text)
+                if f_entries:
+                    logger.info("Parsed %d entries via flat-line format (Format F)", len(f_entries))
+                    return f_entries
+        except Exception as _fe:
+            logger.warning("Flat-line PDF parse failed: %s", _fe)
 
         # ── Try Format E: Tally two-column P&L/BS (word bbox method) first ──────
         if _detect_tally_two_col(file_path):

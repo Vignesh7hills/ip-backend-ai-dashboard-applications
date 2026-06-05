@@ -162,6 +162,14 @@ def _classify(df: pd.DataFrame, file_path: str) -> str:
     if ('debit' in all_text or ' dr ' in all_text) and date_count >= 2:
         scores['ledger'] += 3
 
+    # ── Flat-line "Name - Debit/Credit Amount" format ─────────────────────────
+    debit_count  = all_text.count('debit')
+    credit_count = all_text.count('credit')
+    if debit_count >= 2 and credit_count >= 2:
+        scores['tb'] += (debit_count + credit_count) * 3   # very strong TB signal
+    if re.search(r'[-–]\s*(debit|credit)\s+[\d,]+', all_text, re.IGNORECASE):
+        scores['tb'] += 10  # flat-line format is definitely a TB
+
     # ── Filename hints ────────────────────────────────────────────────────────
     fname = file_path.rsplit('/', 1)[-1].lower()
     if any(k in fname for k in ('tds', '94', '26q', 'challan', 'deductee')):
