@@ -1,27 +1,31 @@
 """
 POST /api/loan-reporting-process
 
-Accepts ANY file format: PDF, Excel (xlsx/xls/xlsm/ods), CSV, TSV, TXT.
-Returns a downloadable Excel report as a StreamingResponse.
+AUTO-ADAPTIVE — accepts any mix of files in a single upload field:
+  • Ledger files (PDF, Excel, CSV) — any filename → loan report data
+  • Annexure files — auto-detected by filename containing 31a/31c/annexure
 
-Auto-detects file format using magic bytes + extension.
-Falls back between parsers automatically.
+All files go into ONE form field called 'files' (or legacy 'file').
+No separate 'annexures' field needed — backend auto-separates them.
 
-Frontend usage:
-  ```js
+Frontend usage (unchanged from old single-file upload):
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append('files', ledgerPDF);
+  formData.append('files', annexure31a);   ← just add them all together
+  formData.append('files', annexure31c);
   axios.post('/api/loan-reporting-process', formData, { responseType: 'blob' })
-  ```
 """
 import os
+import re
 import tempfile
+from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 import io
 
 from app.modules.loan_reporting.service import LoanReportingService
 from app.utils.file_detector import detect_file_type, validate_file_size
+from app.utils.annexure_parser import parse_annexure_files
 from app.core.exceptions import (
     FileParseError, EmptyFileError, UnsupportedFileTypeError, FinanceBackendError
 )
@@ -32,91 +36,130 @@ logger = get_logger(__name__)
 router = APIRouter()
 _service = LoanReportingService()
 
-# All accepted MIME types / extensions
-_ACCEPTED_TYPES = {'pdf', 'excel', 'csv', 'xml', 'docx'}
+# Keywords that flag a file as an annexure reference document
+_ANNEXURE_KW = re.compile(
+    r'(31\s*[ac]|annexure|annex|annx|ann_)',
+    re.IGNORECASE
+)
+
+
+def _is_annexure_file(filename: str) -> bool:
+    """Return True if filename suggests this is an Annexure 31a/31c file."""
+    return bool(_ANNEXURE_KW.search(filename))
 
 
 @router.post(
     "/loan-reporting-process",
-    summary="Process Loans & Advances ledger (any format) → Loan Reporting Excel",
-    response_description="Excel file (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)",
+    summary="Process Loans & Advances (multiple files + auto-detected annexures) → Excel",
     tags=["Loan Reporting"],
 )
 async def loan_reporting_process(
-    file: UploadFile = File(..., description=(
-        "Loans & Advances ledger in ANY format: "
-        "PDF (Tally export), Excel (.xlsx/.xls/.xlsm/.ods), CSV, TSV, or TXT"
+    files: List[UploadFile] = File(..., description=(
+        "All files together: ledger PDFs/Excel/CSV AND optional Annexure 31a/31c XLS. "
+        "Annexures are auto-detected from filename (must contain 31a, 31c, or 'annexure')."
     )),
-    company_name: str = Form(default='', description="Company name for report header"),
+    # Legacy single-file field — kept for backward compatibility
+    file: Optional[UploadFile] = File(default=None),
+    company_name: str = Form(default=''),
 ):
     """
-    Pipeline:
-      1. Accept any file format — magic-byte detection, not just extension
-      2. Auto-select parser (PDF or Excel/CSV)
-      3. Parse → extract all account blocks
-      4. Normalize transactions
-      5. Validate balances
-      6. Calculate: taken, repaid, maximum, squared_up
-      7. Generate Excel
-      8. Return Excel as StreamingResponse (blob)
+    Auto-separates uploaded files into ledger files and annexure files by filename.
+    Then: parse ledgers → enrich PAN/Address from annexures → generate Excel.
     """
-    content = await file.read()
-    fname = file.filename or 'upload'
+    # Merge legacy 'file' field with 'files'
+    all_uploads: List[UploadFile] = list(files or [])
+    if file is not None:
+        all_uploads.insert(0, file)
 
-    # ── Size validation ───────────────────────────────────────────────────────
+    if not all_uploads:
+        raise HTTPException(status_code=422, detail="No files provided.")
+
+    ledger_paths: List[str]  = []
+    annex_paths:  List[str]  = []
+
     try:
-        validate_file_size(len(content), max_mb=settings.MAX_FILE_SIZE_MB)
-    except UnsupportedFileTypeError as exc:
-        raise HTTPException(status_code=413, detail=str(exc))
+        for upload in all_uploads:
+            content = await upload.read()
+            fname   = upload.filename or 'upload'
 
-    # ── File-type detection (magic bytes + extension) ─────────────────────────
-    try:
-        file_type = detect_file_type(fname, content)
-    except UnsupportedFileTypeError as exc:
-        raise HTTPException(status_code=415, detail=str(exc))
+            try:
+                validate_file_size(len(content), max_mb=settings.MAX_FILE_SIZE_MB)
+            except UnsupportedFileTypeError as exc:
+                raise HTTPException(status_code=413, detail=str(exc))
 
-    logger.info(
-        "Loan Reporting: file='%s' type=%s size=%d bytes",
-        fname, file_type, len(content)
-    )
+            # ── Auto-detect: annexure or ledger? ─────────────────────────────
+            if _is_annexure_file(fname):
+                ext = os.path.splitext(fname)[1] or '.xls'
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=ext, dir=str(settings.TEMP_DIR)
+                ) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
 
-    # ── Determine file extension for saving temp file ────────────────────────
-    ext_map = {
-        'pdf':   '.pdf',
-        'excel': _get_excel_ext(fname),
-        'csv':   _get_csv_ext(fname),
-        'xml':   '.xml',
-        'docx':  '.docx',
-    }
-    suffix = ext_map.get(file_type, os.path.splitext(fname)[1] or '.tmp')
+                # Rename so 31a/31c is preserved in path for parser detection
+                final_path = tmp_path + '_' + re.sub(r'[/\\]', '_', fname)
+                os.rename(tmp_path, final_path)
+                annex_paths.append(final_path)
+                logger.info("Annexure file detected: %s (%d bytes)", fname, len(content))
 
-    # ── Save temp file ────────────────────────────────────────────────────────
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=suffix, dir=str(settings.TEMP_DIR)
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
+            else:
+                # Ledger file
+                try:
+                    file_type = detect_file_type(fname, content)
+                except UnsupportedFileTypeError as exc:
+                    raise HTTPException(status_code=415, detail=str(exc))
+
+                ext = _ext_for(fname, file_type)
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=ext, dir=str(settings.TEMP_DIR)
+                ) as tmp:
+                    tmp.write(content)
+                    ledger_paths.append(tmp.name)
+                logger.info("Ledger file: %s → %s (%d bytes)", fname, file_type, len(content))
+
+        if not ledger_paths:
+            raise HTTPException(status_code=422, detail={
+                "error": "no_ledger",
+                "message": (
+                    "No ledger files found. All files were detected as annexures. "
+                    "Please include at least one loan ledger PDF or Excel file."
+                )
+            })
+
+        # ── Parse annexure reference ──────────────────────────────────────────
+        annexure_ref = {}
+        if annex_paths:
+            try:
+                annexure_ref = parse_annexure_files(annex_paths)
+                logger.info("Annexure ref built: %d records from %d file(s)",
+                            len(annexure_ref), len(annex_paths))
+            except Exception as e:
+                logger.warning("Annexure parse warning (non-fatal): %s", e)
+        else:
+            logger.info("No annexure files uploaded — PAN/Address will be blank")
 
         # ── Run pipeline ──────────────────────────────────────────────────────
-        result = _service.process(
-            pdf_path=tmp_path,
+        result = _service.process_multiple(
+            file_paths=ledger_paths,
             company_name=company_name or '',
-            file_type=file_type,
+            annexure_ref=annexure_ref,
         )
 
         excel_bytes: bytes = result['excel_bytes']
 
-        # ── Return Excel blob ─────────────────────────────────────────────────
-        out_filename = "loan_reporting_report.xlsx"
+        ann_note = f"{len(annex_paths)} annexure(s) used" if annex_paths else "no annexures"
         headers = {
-            "Content-Disposition": f'attachment; filename="{out_filename}"',
+            "Content-Disposition": 'attachment; filename="loan_reporting_report.xlsx"',
             "X-Records-Processed": str(result['records']),
-            "X-Warnings-Count":    str(len(result['warnings'])),
-            "X-Duration-Ms":       f"{result['duration_ms']:.0f}",
-            "X-Source-Format":     file_type,
+            "X-Ledger-Files":      str(len(ledger_paths)),
+            "X-Annexure-Files":    str(len(annex_paths)),
+            "X-Annexure-Records":  str(len(annexure_ref)),
+            "X-Warnings-Count":    str(len(result.get('warnings', []))),
+            "X-Duration-Ms":       f"{result.get('duration_ms', 0):.0f}",
         }
+        logger.info("Loan Reporting done: %d records, %s",
+                    result['records'], ann_note)
+
         return StreamingResponse(
             content=io.BytesIO(excel_bytes),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -124,24 +167,28 @@ async def loan_reporting_process(
         )
 
     except EmptyFileError as exc:
-        raise HTTPException(status_code=422, detail={"error": "empty_file",       "message": str(exc)})
+        raise HTTPException(status_code=422, detail={"error": "empty_file",    "message": str(exc)})
     except FileParseError as exc:
-        raise HTTPException(status_code=422, detail={"error": "parse_error",      "message": str(exc)})
+        raise HTTPException(status_code=422, detail={"error": "parse_error",   "message": str(exc)})
     except FinanceBackendError as exc:
-        raise HTTPException(status_code=422, detail={"error": "processing_error", "message": str(exc)})
+        raise HTTPException(status_code=422, detail={"error": "processing",    "message": str(exc)})
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Unexpected error in loan reporting")
-        raise HTTPException(status_code=500, detail={"error": "internal_error",   "message": str(exc)})
+        raise HTTPException(status_code=500, detail={"error": "internal_error","message": str(exc)})
     finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        for p in ledger_paths + annex_paths:
+            try:
+                if os.path.exists(p): os.unlink(p)
+            except Exception:
+                pass
 
 
-def _get_excel_ext(fname: str) -> str:
+def _ext_for(fname: str, file_type: str) -> str:
     ext = os.path.splitext(fname)[1].lower()
-    return ext if ext in ('.xlsx', '.xls', '.xlsm', '.ods') else '.xlsx'
-
-
-def _get_csv_ext(fname: str) -> str:
-    ext = os.path.splitext(fname)[1].lower()
-    return ext if ext in ('.csv', '.tsv', '.txt') else '.csv'
+    if ext: return ext
+    return {
+        'pdf': '.pdf', 'excel': '.xlsx', 'csv': '.csv',
+        'xml': '.xml', 'docx': '.docx',
+    }.get(file_type, '.tmp')
