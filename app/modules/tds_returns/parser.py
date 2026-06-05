@@ -503,11 +503,64 @@ class TDSReturnsParser:
             "Column names are matched flexibly — exact spelling is not required."
         )
 
+
+    def _merge_header_rows(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Merge up to 3 consecutive text-only rows into one combined header row.
+        Handles Tally exports that split column headers across 2 rows.
+        """
+        if len(df) < 3:
+            return df
+
+        _DATE_CHECK = re.compile(r'\d{2}[-/]\d{2}[-/]\d{4}')
+
+        def _is_header_row(ri):
+            row = [str(c).strip() for c in df.iloc[ri]]
+            non_empty = [c for c in row if c and c.lower() not in ('nan', '')]
+            if not non_empty:
+                return False
+            date_hits = sum(1 for c in non_empty if _DATE_CHECK.search(c))
+            num_hits  = sum(1 for c in non_empty
+                           if re.match(r'^[\d,]+\.?\d*$', c.replace(',', '')))
+            return date_hits == 0 and num_hits < len(non_empty) * 0.5
+
+        merge_n = 0
+        for ri in range(min(3, len(df))):
+            if _is_header_row(ri):
+                merge_n += 1
+            else:
+                break
+
+        if merge_n <= 1:
+            return df
+
+        merged = []
+        for ci in range(df.shape[1]):
+            parts = []
+            for ri in range(merge_n):
+                v = str(df.iloc[ri, ci]).strip()
+                if v and v.lower() not in ('nan', ''):
+                    parts.append(v)
+            merged.append(' '.join(parts).strip())
+
+        import pandas as _pd2
+        merged_row = _pd2.DataFrame([merged], columns=df.columns)
+        rest = df.iloc[merge_n:].reset_index(drop=True)
+        return _pd2.concat([merged_row, rest], ignore_index=True)
+
     def _parse_adaptive(self, df: pd.DataFrame, fname: str) -> List[TDSEntry]:
         """
         Single adaptive parser that works for ALL TDS file formats by detecting
         columns semantically rather than matching hard-coded format signatures.
+
+        Pre-processing: merges multi-row headers (rows that look like header
+        continuations, e.g. row 0 = "Party Name | PAN | Amount" and row 1 =
+        "Name | No. | (Rs.)") into a single combined header row so that alias
+        matching always works regardless of how many header rows the file has.
         """
+        # Pre-process: merge consecutive non-data rows into combined header strings
+        df = self._merge_header_rows(df)
+
         header_row, cols = _detect_header_row(df)
         if header_row < 0:
             return []
@@ -660,19 +713,43 @@ class TDSReturnsParser:
         return entries
 
     def _pdf_to_dataframe(self, file_path: str) -> pd.DataFrame:
+        all_rows = []
+
+        # Try pypdf first
         try:
             from pypdf import PdfReader
-        except ImportError:
-            raise FileParseError("pypdf not installed.")
-        all_rows = []
-        reader = PdfReader(file_path)
-        for page in reader.pages:
-            for line in (page.extract_text() or '').split('\n'):
-                line = line.strip()
-                if line:
-                    all_rows.append(re.split(r'\s{2,}', line))
+            reader = PdfReader(file_path)
+            for page in reader.pages:
+                for line in (page.extract_text() or '').split('\n'):
+                    line = line.strip()
+                    if line:
+                        all_rows.append(re.split(r'\s{2,}', line))
+        except Exception:
+            pass
+
+        # Try pdfplumber as fallback (better table detection)
+        if not all_rows:
+            try:
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages:
+                        tables = page.extract_tables() or []
+                        for table in tables:
+                            for row in table:
+                                cleaned = [str(c or '').strip() for c in row]
+                                if any(cleaned):
+                                    all_rows.append(cleaned)
+                        if not tables:
+                            for line in (page.extract_text() or '').split('\n'):
+                                line = line.strip()
+                                if line:
+                                    all_rows.append(re.split(r'\s{2,}', line))
+            except Exception as e:
+                raise FileParseError(f"PDF extraction failed: {e}")
+
         if not all_rows:
             raise EmptyFileError("No text found in PDF.")
+
         max_cols = max(len(r) for r in all_rows)
         padded = [r + [''] * (max_cols - len(r)) for r in all_rows]
         return pd.DataFrame(padded, dtype=str)

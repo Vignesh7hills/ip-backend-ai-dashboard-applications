@@ -51,11 +51,11 @@ async def tds_returns_process(
             fname = up.filename or 'upload.xlsx'
             try:
                 validate_file_size(len(content), max_mb=settings.MAX_FILE_SIZE_MB)
-                file_type = detect_file_type(fname)
+                file_type = detect_file_type(fname, content)
             except UnsupportedFileTypeError as exc:
                 raise HTTPException(status_code=415, detail=str(exc))
 
-            if file_type not in ('excel', 'csv', 'pdf'):
+            if file_type not in ('excel', 'csv', 'pdf', 'xml', 'docx'):
                 raise HTTPException(
                     status_code=415,
                     detail=f"TDS Returns requires XLSX/XLS/CSV/PDF — '{fname}' is not supported."
