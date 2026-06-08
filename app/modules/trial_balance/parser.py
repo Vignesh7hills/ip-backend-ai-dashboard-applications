@@ -722,6 +722,133 @@ def _parse_flat_line_text(text: str) -> List[TrialBalanceEntry]:
     return entries
 
 
+# ── Format G: Section-header "Name : Amount" (BS/PL extract without table) ───
+# Handles PDFs/text with:
+#   LIABILITIES
+#   Capital Account : 3,00,000
+#   ASSETS
+#   Furniture : 2,00,000
+#   PROFIT & LOSS ACCOUNT
+#   Sales : 12,00,000
+
+_SECTION_HEADERS = {
+    # header keyword → (side, is_pl)
+    'liabilit':  ('credit', False),
+    'capital':   ('credit', False),
+    'asset':     ('debit',  False),
+    'income':    ('credit', True),
+    'sales':     ('credit', True),
+    'revenue':   ('credit', True),
+    'receipt':   ('credit', True),
+    'expenditure': ('debit', True),
+    'expense':   ('debit',  True),
+    'purchase':  ('debit',  True),
+    'profit':    ('debit',  True),   # heading line, not entry
+    'loss':      ('debit',  True),
+}
+
+_COLON_ENTRY_RE = re.compile(
+    r'^(.+?)\s*[:\-]\s*([(\-]?[\d,]+\.?\d*[)]?)\s*$'
+)
+
+
+def _is_section_header_format(text: str) -> bool:
+    """Return True if text has 'Name : Amount' lines under section headers."""
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    colon_hits = sum(1 for l in lines if _COLON_ENTRY_RE.match(l) and
+                     any(c.isdigit() for c in l))
+    # Also check that there's at least one recognisable section keyword
+    has_section = any(
+        any(kw in l.lower() for kw in _SECTION_HEADERS)
+        for l in lines[:20]
+    )
+    return colon_hits >= 3 and has_section
+
+
+def _parse_section_header_format(text: str) -> List[TrialBalanceEntry]:
+    """
+    Parse 'Section Header\\nName : Amount' text into TrialBalanceEntry list.
+
+    Rules:
+      LIABILITIES section  → credit side
+      ASSETS section       → debit side
+      PROFIT & LOSS ACCOUNT (income-like header) → Sales/Income → credit; Purchases/Expenses → debit
+    """
+    entries: List[TrialBalanceEntry] = []
+    current_side  = 'debit'   # default
+    current_group = ''
+    in_pl         = False
+
+    _CREDIT_SECTIONS = {'liabilit', 'capital', 'income', 'sales', 'revenue', 'receipt'}
+    _DEBIT_SECTIONS  = {'asset', 'expenditure', 'expense', 'purchase'}
+    _PL_SECTIONS     = {'profit', 'loss', 'trading', 'p & l', 'p&l', 'income', 'expenditure',
+                        'sales', 'purchase', 'revenue', 'receipt', 'expense'}
+    _INCOME_KW       = {'sales', 'income', 'revenue', 'receipt', 'interest received',
+                        'commission received', 'discount received'}
+    _EXPENSE_KW      = {'purchase', 'salary', 'rent', 'wages', 'depreciation', 'expense',
+                        'expenditure', 'interest paid', 'commission paid', 'advertisement'}
+
+    def _infer_pl_side(name: str) -> str:
+        nl = name.lower()
+        if any(kw in nl for kw in _INCOME_KW):
+            return 'credit'
+        if any(kw in nl for kw in _EXPENSE_KW):
+            return 'debit'
+        # Default P&L: left side (expenses) → debit
+        return current_side
+
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        ll = line.lower()
+
+        # ── Detect section / group header ─────────────────────────────────────
+        # A section header is a line with NO colon-amount pattern (or a known keyword line)
+        m = _COLON_ENTRY_RE.match(line)
+        if not m or not any(c.isdigit() for c in line):
+            # Could be a section header
+            matched_kw = next((kw for kw in list(_CREDIT_SECTIONS) + list(_DEBIT_SECTIONS) + list(_PL_SECTIONS)
+                               if kw in ll), None)
+            if matched_kw:
+                in_pl = any(kw in ll for kw in _PL_SECTIONS - _CREDIT_SECTIONS - _DEBIT_SECTIONS)
+                if any(kw in ll for kw in _CREDIT_SECTIONS):
+                    current_side = 'credit'
+                elif any(kw in ll for kw in _DEBIT_SECTIONS):
+                    current_side = 'debit'
+                # PROFIT & LOSS section — side will be inferred per-entry
+                if any(kw in ll for kw in _PL_SECTIONS):
+                    in_pl = True
+                current_group = line.title()
+            continue
+
+        # ── Parse "Name : Amount" entry ───────────────────────────────────────
+        name    = _clean(m.group(1).strip())
+        amt_str = m.group(2).strip()
+        if amt_str.startswith('(') and amt_str.endswith(')'):
+            amt_str = '-' + amt_str[1:-1]
+        amount = parse_amount(amt_str)
+
+        if not name or amount == 0.0:
+            continue
+        if _is_skip(name):
+            continue
+        if len(name) < 2:
+            continue
+
+        side = _infer_pl_side(name) if in_pl else current_side
+
+        e = TrialBalanceEntry(account_name=name, group=current_group)
+        if side == 'credit':
+            e.credit = abs(amount)
+        else:
+            e.debit  = abs(amount)
+        entries.append(e)
+
+    return entries
+
+
 # ── Main parser ───────────────────────────────────────────────────────────────
 
 class TrialBalanceParser:
@@ -829,6 +956,19 @@ class TrialBalanceParser:
 
     def _parse_pdf(self, file_path: str) -> List[TrialBalanceEntry]:
         import pdfplumber
+
+        # ── Try Format G: Section-header "Name : Amount" BS/PL extract ──────────
+        try:
+            import pdfplumber as _ppl
+            with _ppl.open(file_path) as _pdf:
+                _text = '\n'.join(p.extract_text() or '' for p in _pdf.pages)
+            if _is_section_header_format(_text):
+                g_entries = _parse_section_header_format(_text)
+                if g_entries:
+                    logger.info("Parsed %d entries via section-header format (Format G)", len(g_entries))
+                    return g_entries
+        except Exception as _ge:
+            logger.warning("Section-header PDF parse failed: %s", _ge)
 
         # ── Try Format F: Flat single-column "Name - Debit/Credit Amount" ────────
         try:
