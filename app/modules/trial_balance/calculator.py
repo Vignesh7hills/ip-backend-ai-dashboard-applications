@@ -2,7 +2,7 @@
 Trial Balance Calculator with intelligent group normalisation.
 Maps raw parsed group names → canonical Genius Software group names.
 """
-from typing import List, Dict
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from app.modules.trial_balance.parser import TrialBalanceEntry
 from app.core.logger import get_logger
@@ -137,6 +137,26 @@ _ALIASES: Dict[str, str] = {
     'purchase account':                'PURCHASE A/C',
     'purchases':                       'PURCHASE A/C',
 
+    # Wages (trading concern) → Trading A/c direct expense
+    'wages':                           'DIRECT EXPENSES (M)',
+    'wages & salary':                  'DIRECT EXPENSES (M)',
+    'wages and salary':                'DIRECT EXPENSES (M)',
+
+    # Common indirect expenses seen without a Group column
+    'electricity expenses':            'INDIRECT EXPENSES',
+    'electricity expense':             'INDIRECT EXPENSES',
+    'electricity':                     'INDIRECT EXPENSES',
+    'electricity charges':             'INDIRECT EXPENSES',
+
+    # Plant & Machinery → Fixed Asset
+    'plant & machinery':               'FIXED ASSETS',
+    'plant and machinery':             'FIXED ASSETS',
+    'plant & machinery a/c':           'FIXED ASSETS',
+
+    # Advance Tax → Balance with Revenue Authority (current asset)
+    'advance tax':                     'BALANCE WITH REVENUE AUTHORITY',
+    'advance income tax':              'BALANCE WITH REVENUE AUTHORITY',
+
     # Manufacturing
     'manufacturing expenses':          'MANUFACTURING EXPENSES',
 
@@ -194,7 +214,8 @@ _KEYWORD_MAP = [
      'SUNDRY CREDITORS'),
     (['sundry debtor'],
      'SUNDRY DEBTORS'),
-    (['fixed asset'],
+    (['fixed asset', 'plant', 'machinery', 'furniture', 'equipment',
+      'building', 'vehicle', 'computer'],
      'FIXED ASSETS'),
     (['opening stock'],
      'OPENING STOCK'),
@@ -219,16 +240,33 @@ _KEYWORD_MAP = [
 ]
 
 
-def _normalise(raw: str) -> str:
-    if not raw:
-        return 'UNGROUPED'
-    key = raw.strip().lower()
+def _match(text: str) -> Optional[str]:
+    """Return the canonical group for a single string, or None if unknown."""
+    if not text:
+        return None
+    key = text.strip().lower()
     if key in _ALIASES:
         return _ALIASES[key]
     for keywords, target in _KEYWORD_MAP:
         if any(kw in key for kw in keywords):
             return target
-    return raw.strip().upper()
+    return None
+
+
+def _normalise(group: str, account_name: str = '') -> str:
+    # 1) Trust an explicit, recognised Group column first.
+    matched = _match(group)
+    if matched:
+        return matched
+    # 2) No usable group (e.g. a PDF/CSV with no Group column) →
+    #    classify by the ledger/account name instead of dumping to UNGROUPED.
+    matched = _match(account_name)
+    if matched:
+        return matched
+    # 3) Keep an explicit-but-unknown group as-is; otherwise leave ungrouped.
+    if group and group.strip():
+        return group.strip().upper()
+    return 'UNGROUPED'
 
 
 class TrialBalanceCalculator:
@@ -241,7 +279,7 @@ class TrialBalanceCalculator:
 
         for entry in data:
             raw = entry.group or ''
-            gname = _normalise(raw)
+            gname = _normalise(raw, entry.account_name)
 
             if gname not in groups:
                 groups[gname] = GroupSummary(group_name=gname)
@@ -255,3 +293,42 @@ class TrialBalanceCalculator:
 
         logger.info("Trial Balance: %d groups, %d entries", len(groups), len(data))
         return groups
+
+
+# ── Profit & Loss group classification (mirrors the Summary sheet) ─────────────
+_INCOME_GROUPS = {
+    'SALES A/C', 'DIRECT INCOMES', 'INDIRECT INCOMES', 'INTEREST RECEIVED',
+    'COMMISSION RECEIVED', 'RENT INCOME', 'DIVIDEND INCOME', 'OTHER INCOMES',
+}
+_EXPENSE_GROUPS = {
+    'PURCHASE A/C', 'MANUFACTURING EXPENSES', 'DIRECT EXPENSES (M)', 'DIRECT WAGES',
+    'POWER AND FUEL (M)', 'CARRIAGE INWARD', 'DIRECT EXPENSES', 'INDIRECT EXPENSES',
+    'COMMISSION PAID', 'COMPENSATION TO EMPLOYEES', 'ADVERTISEMENT', 'FREIGHT',
+    'INSURANCE', 'TELEPHONE', 'TRAVELLING', 'CONVEYANCE', 'RENT', 'RATES AND TAXES',
+    'REPAIR & MAINTENANCE', 'POWER AND FUEL', 'DEPRECIATION', 'BAD DEBTS', 'DONATION',
+    'OTHER EXPENSES', 'AUDITORS REMUNERATION', 'INTEREST PAID', 'FINANCIAL EXPENSES',
+    'EXTRA-ORDINARY EXPENSES', 'STAFF WELFARE',
+}
+
+
+def compute_pl_net_profit(groups: Dict[str, GroupSummary]) -> float:
+    """Net Profit / (Loss) derived ONLY from classified P&L groups.
+
+    Positive = profit, negative = loss. This is the real result of operations —
+    it is NOT the Dr/Cr difference of the trial balance. A trial balance that
+    does not tie is a data error, never a profit.
+    """
+    income = expense = 0.0
+    op_dr = op_cr = cl_dr = cl_cr = 0.0
+    for name, g in groups.items():
+        if name in _INCOME_GROUPS:
+            income += g.total_credit - g.total_debit
+        elif name in _EXPENSE_GROUPS:
+            expense += g.total_debit - g.total_credit
+        elif name == 'OPENING STOCK':
+            op_dr += g.total_debit; op_cr += g.total_credit
+        elif name == 'CLOSING STOCK':
+            cl_dr += g.total_debit; cl_cr += g.total_credit
+    closing = cl_cr - cl_dr
+    opening = op_dr - op_cr
+    return round(income - expense + closing - opening, 2)
