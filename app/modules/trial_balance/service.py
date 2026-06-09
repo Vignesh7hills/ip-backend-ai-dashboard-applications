@@ -4,7 +4,7 @@ from typing import List
 from app.utils.universal_parser import parse_for_trial_balance
 from app.modules.trial_balance.parser import TrialBalanceEntry
 from app.modules.trial_balance.validator import TrialBalanceValidator
-from app.modules.trial_balance.calculator import TrialBalanceCalculator
+from app.modules.trial_balance.calculator import TrialBalanceCalculator, compute_pl_net_profit
 from app.modules.trial_balance.generator import TrialBalanceExcelGenerator
 from app.core.logger import get_logger
 from app.core.exceptions import EmptyFileError
@@ -65,23 +65,33 @@ class TrialBalanceService:
             log(f"Excluded {before - len(all_entries)} Closing Stock entries")
             warnings.append("Closing Stock excluded from Trial Balance (per TB rules).")
 
-        # ── Net Profit → Capital ──────────────────────────────────────────────
-        total_dr = sum(e.debit  for e in all_entries)
-        total_cr = sum(e.credit for e in all_entries)
-        np_diff  = total_cr - total_dr
+        # ── Trial balance integrity check ─────────────────────────────────────
+        # A correctly-entered trial balance MUST have equal Debit and Credit
+        # totals. Any leftover Dr/Cr difference is a DATA ERROR in the source —
+        # it is NOT profit and must never be silently plugged into Capital.
+        total_dr = round(sum(e.debit  for e in all_entries), 2)
+        total_cr = round(sum(e.credit for e in all_entries), 2)
+        imbalance = round(total_dr - total_cr, 2)
 
-        if abs(np_diff) > 0.50:
-            np_entry = TrialBalanceEntry(
-                account_name='Net Profit for the Year', group='CAPITAL')
-            if np_diff > 0:
-                np_entry.debit  = round(np_diff, 2)
-            else:
-                np_entry.credit = round(abs(np_diff), 2)
-            all_entries.append(np_entry)
-            tag = 'Profit' if np_diff > 0 else 'Loss'
-            log(f"Net {tag} ₹{abs(np_diff):,.2f} transferred to CAPITAL A/c")
+        if abs(imbalance) > 0.50:
+            msg = (
+                f"Trial balance does NOT tie: Debit \u20b9{total_dr:,.2f} vs "
+                f"Credit \u20b9{total_cr:,.2f} (difference \u20b9{abs(imbalance):,.2f}). "
+                f"This is an error in the source data, not a profit \u2014 please "
+                f"correct it. No balancing entry has been created."
+            )
+            warnings.append(msg)
+            log("\u26a0 " + msg)
+
+        # ── Net Profit / (Loss) — derived from the P&L GROUPS, never the Dr/Cr gap ──
+        pl_groups = self.calculator.compute(all_entries)
+        net_pl = compute_pl_net_profit(pl_groups)
+        if abs(net_pl) > 0.50:
+            tag = 'Profit' if net_pl > 0 else 'Loss'
+            log(f"Net {tag} \u20b9{abs(net_pl):,.2f} (computed from P&L ledgers)")
             warnings.append(
-                f"Net {tag} ₹{abs(np_diff):,.2f} transferred to Capital A/c per TB rules."
+                f"Net {tag} \u20b9{abs(net_pl):,.2f} computed from P&L ledgers "
+                f"(shown in the Summary sheet)."
             )
 
         log("Step 2/4: Validating")
