@@ -303,11 +303,18 @@ def _match(text: str) -> Optional[str]:
     # 1) Exact alias wins.
     if key in _ALIASES:
         return _ALIASES[key]
-    # 2) Expense indicator: any "...Expenses/Charges/Fees/Bill" ledger is a P&L
+    # 2) Balance-sheet PARTY/LIABILITY indicator outranks the expense guard:
+    #    "Sundry Creditors for Expenses" (often PDF-truncated to "...EXPENS")
+    #    is a liability, never a P&L expense, despite containing "exp".
+    _BS_PARTY = ('creditor', 'debtor', 'payable', 'receivable',
+                 'loan', 'borrow', 'provision', 'outstanding')
+    is_bs_party = any(p in key for p in _BS_PARTY)
+    # 3) Expense indicator: any "...Expenses/Charges/Fees/Bill" ledger is a P&L
     #    expense, never an asset or creditor. Guard runs before keyword guesses.
     #    ('prepaid expenses' is an asset group and only ever arrives via the
     #    Group column, which is matched before account names.)
-    if 'prepaid' not in key and any(ind in key for ind in _EXPENSE_INDICATORS):
+    if not is_bs_party and 'prepaid' not in key \
+            and any(ind in key for ind in _EXPENSE_INDICATORS):
         return 'INDIRECT EXPENSES'
     # 3) Standalone asset ledger names.
     if key in _ASSET_TERMS:
@@ -395,6 +402,15 @@ def compute_pl_net_profit(groups: Dict[str, GroupSummary]) -> float:
             op_dr += g.total_debit; op_cr += g.total_credit
         elif name == 'CLOSING STOCK':
             cl_dr += g.total_debit; cl_cr += g.total_credit
-    closing = cl_cr - cl_dr
-    opening = op_dr - op_cr
+    # When BOTH the P&L (credit side) and the Balance Sheet (asset/debit
+    # side) report the same stock figure, the two entries describe ONE
+    # stock value — they must not cancel each other to zero.
+    if cl_cr > 0 and cl_dr > 0 and abs(cl_cr - cl_dr) <= 1.0:
+        closing = cl_cr
+    else:
+        closing = cl_cr - cl_dr
+    if op_dr > 0 and op_cr > 0 and abs(op_dr - op_cr) <= 1.0:
+        opening = op_dr
+    else:
+        opening = op_dr - op_cr
     return round(income - expense + closing - opening, 2)

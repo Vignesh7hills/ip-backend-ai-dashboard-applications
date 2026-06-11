@@ -76,9 +76,23 @@ def _col_has(cell: str, keywords: List[str]) -> bool:
     return False
 
 
+_TOTAL_KW  = {'total', 'grand total', 'sub total', 'subtotal', 'net total'}
+_PROFIT_KW = {'gross profit', 'net profit', 'net loss'}
+
+
 def _is_skip(name: str) -> bool:
     nl = name.lower().strip()
     return any(kw in nl for kw in _SKIP_ROW_KW)
+
+
+def _is_total_row(name: str) -> bool:
+    nl = name.lower().strip()
+    return any(kw in nl for kw in _TOTAL_KW)
+
+
+def _is_profit_row(name: str) -> bool:
+    nl = name.lower().strip()
+    return any(kw in nl for kw in _PROFIT_KW)
 
 
 def _is_numeric(v) -> bool:
@@ -276,6 +290,21 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
     entries: List[TrialBalanceEntry] = []
     left_group = right_group = ''
 
+    # Group-total fallback bookkeeping:
+    # When a group header row carries its total (sub=0, total≠0) but every
+    # detail row under it has no parseable amount in the numeric columns
+    # (e.g. "YARN STOCK :-42518020" — figure embedded in the NAME text),
+    # the whole group would silently vanish. Track each group's header
+    # total and how many entries it actually produced; emit the header
+    # total itself as a single entry for any group that produced none.
+    # NOTE: we deliberately do NOT parse amounts embedded in names — in
+    # Tally P&L exports those are often CLOSING values printed beside
+    # OPENING rows, so the header total is the only trustworthy figure.
+    left_group_totals:  Dict[str, float] = {}
+    right_group_totals: Dict[str, float] = {}
+    left_group_counts:  Dict[str, int]   = {}
+    right_group_counts: Dict[str, int]   = {}
+
     def sv(row_vals, col):
         return row_vals[col] if 0 <= col < len(row_vals) else ''
 
@@ -292,6 +321,8 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
                 pass
             elif left_sub == 0.0 and left_total != 0.0:
                 left_group = left_name
+                left_group_totals[left_group] = left_total
+                left_group_counts.setdefault(left_group, 0)
             elif left_sub != 0.0:
                 amt = left_sub
                 e = TrialBalanceEntry(account_name=left_name, group=left_group)
@@ -302,6 +333,8 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
                     e.credit = amt if amt >= 0 else 0.0
                     e.debit  = abs(amt) if amt < 0  else 0.0
                 entries.append(e)
+                if left_group:
+                    left_group_counts[left_group] = left_group_counts.get(left_group, 0) + 1
 
         right_name  = _clean(sv(row_raw, rn_col))
         right_sub   = parse_amount(sv(row_raw, rs_col))
@@ -312,6 +345,8 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
                 pass
             elif right_sub == 0.0 and right_total != 0.0:
                 right_group = right_name
+                right_group_totals[right_group] = right_total
+                right_group_counts.setdefault(right_group, 0)
             elif right_sub != 0.0:
                 amt = right_sub
                 e = TrialBalanceEntry(account_name=right_name, group=right_group)
@@ -322,6 +357,39 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
                     e.debit  = amt if amt >= 0 else 0.0
                     e.credit = abs(amt) if amt < 0  else 0.0
                 entries.append(e)
+                if right_group:
+                    right_group_counts[right_group] = right_group_counts.get(right_group, 0) + 1
+
+    # ── Group-total fallback ──────────────────────────────────────────────
+    # Any group whose header carried a total but whose detail rows yielded
+    # ZERO entries gets emitted once, at the header total, on the correct
+    # side. Fixes e.g. OPENING STOCK ₹5,09,31,678.67 being dropped because
+    # YARN/CLOTH detail amounts live inside the name text, not the columns.
+    for grp, total in left_group_totals.items():
+        if left_group_counts.get(grp, 0) == 0 and total != 0.0:
+            e = TrialBalanceEntry(account_name=grp, group=grp)
+            if is_pl:
+                e.debit  = abs(total) if total >= 0 else 0.0
+                e.credit = abs(total) if total < 0  else 0.0
+            else:
+                e.credit = total if total >= 0 else 0.0
+                e.debit  = abs(total) if total < 0  else 0.0
+            entries.append(e)
+            logger.info("Group-total fallback (left/%s): %s = %.2f",
+                        'Dr' if is_pl else 'Cr', grp, total)
+
+    for grp, total in right_group_totals.items():
+        if right_group_counts.get(grp, 0) == 0 and total != 0.0:
+            e = TrialBalanceEntry(account_name=grp, group=grp)
+            if is_pl:
+                e.credit = total if total >= 0 else 0.0
+                e.debit  = abs(total) if total < 0  else 0.0
+            else:
+                e.debit  = total if total >= 0 else 0.0
+                e.credit = abs(total) if total < 0  else 0.0
+            entries.append(e)
+            logger.info("Group-total fallback (right/%s): %s = %.2f",
+                        'Cr' if is_pl else 'Dr', grp, total)
 
     return entries
 
@@ -520,6 +588,186 @@ def _parse_pdf_two_column_table(table) -> List[TrialBalanceEntry]:
         entries.append(e)
     return entries
 
+
+
+# ── Format H: PARTICULARS/AMOUNT two-sided PDF, indentation-based ────────────
+# (Genius / Miracle style BS & P&L exports, e.g. UMA TEXCOM bs.pdf / pl.pdf)
+#
+# Layout facts this parser relies on (verified by word x-positions):
+#   • Header row: "PARTICULARS  AMOUNT Rs.  PARTICULARS  AMOUNT RS."
+#   • Group rows and detail rows share the SAME right-aligned amount column,
+#     so amount x-position CANNOT distinguish them (Format E double-counts).
+#   • The real signal is NAME INDENTATION: group names start at the side's
+#     left margin; detail names are indented a few points to the right.
+#   • Left side semantics:  BS → Liabilities (Cr) | P&L → Expenses (Dr)
+#     Right side semantics: BS → Assets (Dr)      | P&L → Income (Cr)
+#   • Parenthesised amounts are negative and flip the column.
+#
+# Only DETAIL rows become entries (group = enclosing header). A group whose
+# details never parsed falls back to the group-header total — same safety
+# net as Format B. Derived rows (TOTAL / GROSS PROFIT / NET PROFIT) are
+# skipped; the service re-derives net profit and plugs it per TB rules.
+
+_H_SKIP_KW = ('particulars', 'total', 'gross profit', 'nett profit',
+              'net profit', 'net loss', 'print date', 'page no', 'amount')
+
+
+def _h_doc_is_pl(text: str) -> bool:
+    t = text.lower()
+    return ('profit' in t and 'loss' in t) or 'trading' in t
+
+
+def _detect_particulars_two_col(pdf_path: str) -> bool:
+    """True when page 1 has a PARTICULARS/AMOUNT header (1 or 2 sided)."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            if not pdf.pages:
+                return False
+            text = (pdf.pages[0].extract_text() or '').lower()
+            return text.count('particulars') >= 1 and 'amount' in text
+    except Exception:
+        return False
+
+
+def _parse_particulars_two_col_pdf(pdf_path: str) -> List[TrialBalanceEntry]:
+    """
+    Two-pass parse:
+      Pass 1 — collect every (side, name_x0, name, amount) row across ALL
+               pages, using tolerance-based row clustering (fixed y-buckets
+               split wrapped rows whose name and amount baselines differ).
+      Pass 2 — classify group vs detail using the DOCUMENT-GLOBAL minimum
+               name x0 per side. Per-page minima misfire on continuation
+               pages that contain only detail rows (everything gets
+               promoted to group level and the grouping cascades).
+    Groups persist across pages; only detail rows become entries; a group
+    whose details never parse falls back to its header total.
+    """
+    import pdfplumber
+
+    raw_rows = []          # (order, side, x0, name, amt)
+    is_pl = False
+    order = 0
+
+    with pdfplumber.open(pdf_path) as pdf:
+        if pdf.pages:
+            is_pl = _h_doc_is_pl(pdf.pages[0].extract_text() or '')
+        last_split_x = None
+
+        for page in pdf.pages:
+            words = page.extract_words(keep_blank_chars=False)
+            if not words:
+                continue
+
+            # ── tolerance-based row clustering (gap > 3.5pt starts new row) ──
+            words.sort(key=lambda w: (float(w['top']), float(w['x0'])))
+            lines, cur, cur_top = [], [], None
+            for w in words:
+                t = float(w['top'])
+                if cur_top is None or t - cur_top <= 3.5:
+                    cur.append(w)
+                    cur_top = t if cur_top is None else max(cur_top, t)
+                else:
+                    lines.append(cur)
+                    cur, cur_top = [w], t
+            if cur:
+                lines.append(cur)
+
+            # ── locate header line & side boundary ────────────────────────
+            header_i, right_start = None, None
+            for i, ln in enumerate(lines):
+                ws = sorted(ln, key=lambda w: float(w['x0']))
+                partis = [w for w in ws
+                          if w['text'].strip().lower().startswith('particular')]
+                if partis and any('amount' in w['text'].lower() for w in ws):
+                    header_i = i
+                    if len(partis) >= 2:
+                        right_start = float(partis[1]['x0'])
+                    break
+            if header_i is None:
+                if last_split_x is None:
+                    continue          # no header seen yet in document
+                split_x, header_i = last_split_x, -1
+            else:
+                if right_start is None:
+                    right_start = page.width * 0.52
+                split_x = right_start - 60
+                last_split_x = split_x
+
+            # ── extract (side, x0, name, amount) per line ──────────────────
+            for ln in lines[header_i + 1:]:
+                ws = sorted(ln, key=lambda w: float(w['x0']))
+                for side, sws in (
+                        ('L', [w for w in ws if float(w['x0']) < split_x]),
+                        ('R', [w for w in ws if float(w['x0']) >= split_x])):
+                    if not sws:
+                        continue
+                    last = sws[-1]
+                    amt = parse_amount(last['text'])
+                    if amt == 0.0 and not _PAREN_NUM_RE.match(last['text']):
+                        continue                      # no trailing amount
+                    name = _clean(' '.join(w['text'] for w in sws[:-1]).strip())
+                    if not name or len(name) < 2:
+                        continue
+                    nl = name.lower()
+                    if any(kw in nl for kw in _H_SKIP_KW):
+                        continue
+                    raw_rows.append((order, side, float(sws[0]['x0']), name, amt))
+                    order += 1
+
+    if not raw_rows:
+        return []
+
+    # ── document-global indent level per side ─────────────────────────────
+    min_x = {}
+    for _, side, x0, _, _ in raw_rows:
+        min_x[side] = min(min_x.get(side, 1e9), x0)
+
+    entries: List[TrialBalanceEntry] = []
+    group_totals: Dict[Tuple[str, str], float] = {}
+    group_counts: Dict[Tuple[str, str], int]   = {}
+    cur_group = {'L': '', 'R': ''}
+
+    for _, side, x0, name, amt in sorted(raw_rows):
+        if (x0 - min_x[side]) < 3.0:          # at the side's left margin → group
+            cur_group[side] = name
+            key = (side, name)
+            group_totals[key] = group_totals.get(key, 0.0) + amt
+            group_counts.setdefault(key, 0)
+            continue
+        entries.append(_h_make_entry(name, cur_group[side], amt, side, is_pl))
+        if cur_group[side]:
+            gkey = (side, cur_group[side])
+            group_counts[gkey] = group_counts.get(gkey, 0) + 1
+
+    # ── group-total fallback: groups whose details never parsed ───────────
+    for (side, gname), total in group_totals.items():
+        if group_counts.get((side, gname), 0) == 0 and total != 0.0:
+            entries.append(_h_make_entry(gname, gname, total, side, is_pl))
+            logger.info("Format H group-total fallback (%s): %s = %.2f",
+                        side, gname, total)
+    return entries
+
+
+_PAREN_NUM_RE = re.compile(r'^\([\d,]+\.?\d*\)$')
+
+
+def _h_make_entry(name: str, group: str, amt: float,
+                  side: str, is_pl: bool) -> TrialBalanceEntry:
+    e = TrialBalanceEntry(account_name=name, group=group)
+    # side semantics; negative amounts flip the column
+    if is_pl:
+        dr_side = (side == 'L')        # P&L: left = expenses (Dr)
+    else:
+        dr_side = (side == 'R')        # BS:  right = assets (Dr)
+    if amt < 0:
+        dr_side = not dr_side
+        amt = abs(amt)
+    if dr_side:
+        e.debit = amt
+    else:
+        e.credit = amt
+    return e
 
 
 # ── Format E: Tally Two-Column P&L / Balance Sheet (pdfplumber word bbox) ───
@@ -931,7 +1179,13 @@ class TrialBalanceParser:
             debit  = parse_amount(debit_val)
             credit = parse_amount(credit_val)
 
-            if _is_skip(account_val):
+            # Totals are always derived rows — skip.
+            # Profit/Loss rows are skipped ONLY when they carry no amount:
+            # a standard TB can legitimately contain a "NET PROFIT" ledger
+            # (grouped under CAPITAL, Dr) which must be preserved.
+            if _is_total_row(account_val):
+                continue
+            if _is_profit_row(account_val) and debit == 0.0 and credit == 0.0:
                 continue
 
             if account_val and debit == 0.0 and credit == 0.0:
@@ -956,6 +1210,21 @@ class TrialBalanceParser:
 
     def _parse_pdf(self, file_path: str) -> List[TrialBalanceEntry]:
         import pdfplumber
+
+        # ── Try Format H: PARTICULARS/AMOUNT two-sided (indentation-based) ──────
+        # Runs FIRST: when a PARTICULARS/AMOUNT header exists, the indentation
+        # method is the only one that correctly separates group headers from
+        # detail rows (they share one amount column, so Format E double-counts
+        # and table extraction merges sides).
+        try:
+            if _detect_particulars_two_col(file_path):
+                h_entries = _parse_particulars_two_col_pdf(file_path)
+                if h_entries:
+                    logger.info("Parsed %d entries via PARTICULARS two-col "
+                                "indentation format (Format H)", len(h_entries))
+                    return h_entries
+        except Exception as _he:
+            logger.warning("Format H PDF parse failed: %s", _he)
 
         # ── Try Format G: Section-header "Name : Amount" BS/PL extract ──────────
         try:

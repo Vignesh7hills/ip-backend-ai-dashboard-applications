@@ -52,7 +52,22 @@ class TrialBalanceService:
         if not all_entries:
             raise EmptyFileError("No data found in any of the supplied files.")
 
-        # ── Closing Stock exclusion ───────────────────────────────────────────
+        # ── Net Profit / (Loss) — computed BEFORE Closing Stock exclusion ────
+        # Closing Stock must be excluded from the TB OUTPUT sheet (per TB
+        # rules), but it is part of the P&L equation. Computing net profit
+        # after the exclusion silently forced closing = 0 and produced a
+        # fictitious loss. So: compute P&L first on the FULL entry list.
+        pl_groups = self.calculator.compute(all_entries)
+        net_pl = compute_pl_net_profit(pl_groups)
+        if abs(net_pl) > 0.50:
+            tag = 'Profit' if net_pl > 0 else 'Loss'
+            log(f"Net {tag} \u20b9{abs(net_pl):,.2f} (computed from P&L ledgers, incl. stock)")
+            warnings.append(
+                f"Net {tag} \u20b9{abs(net_pl):,.2f} computed from P&L ledgers "
+                f"(shown in the Summary sheet)."
+            )
+
+        # ── Closing Stock exclusion (OUTPUT sheet only) ───────────────────────
         has_closing = any(
             'closing' in (e.group or '').lower() or 'closing' in e.account_name.lower()
             for e in all_entries
@@ -66,12 +81,34 @@ class TrialBalanceService:
             warnings.append("Closing Stock excluded from Trial Balance (per TB rules).")
 
         # ── Trial balance integrity check ─────────────────────────────────────
-        # A correctly-entered trial balance MUST have equal Debit and Credit
-        # totals. Any leftover Dr/Cr difference is a DATA ERROR in the source —
-        # it is NOT profit and must never be silently plugged into Capital.
         total_dr = round(sum(e.debit  for e in all_entries), 2)
         total_cr = round(sum(e.credit for e in all_entries), 2)
         imbalance = round(total_dr - total_cr, 2)
+
+        # ── Net Profit → Capital plug (Note_TB rule 6) ────────────────────────
+        # "If difference is only to the tune of net profit amount, transfer
+        #  net profit to capital a/c in trial balance with debit column."
+        # Capital already includes the year's profit, so the TB is short on
+        # the Dr side by exactly the net profit. Plug ONLY when the gap
+        # matches the independently computed P&L result (tolerance \u20b91).
+        if abs(imbalance) > 0.50 and abs(net_pl) > 0.50 \
+                and abs(abs(imbalance) - abs(net_pl)) <= 1.00:
+            plug = TrialBalanceEntry(account_name='NET PROFIT', group='CAPITAL')
+            if imbalance < 0:          # Cr > Dr -> plug on the Debit side
+                plug.debit = abs(imbalance)
+            else:                      # Dr > Cr -> plug on the Credit side
+                plug.account_name = 'NET LOSS'
+                plug.credit = abs(imbalance)
+            all_entries.append(plug)
+            log(f"\u2713 {plug.account_name} \u20b9{abs(imbalance):,.2f} "
+                f"transferred to CAPITAL (matches P&L result) \u2014 TB now tallies")
+            warnings.append(
+                f"{plug.account_name} \u20b9{abs(imbalance):,.2f} transferred to "
+                f"CAPITAL A/c per TB rules (Dr/Cr gap equals computed P&L result)."
+            )
+            total_dr = round(sum(e.debit  for e in all_entries), 2)
+            total_cr = round(sum(e.credit for e in all_entries), 2)
+            imbalance = round(total_dr - total_cr, 2)
 
         if abs(imbalance) > 0.50:
             msg = (
@@ -82,17 +119,6 @@ class TrialBalanceService:
             )
             warnings.append(msg)
             log("\u26a0 " + msg)
-
-        # ── Net Profit / (Loss) — derived from the P&L GROUPS, never the Dr/Cr gap ──
-        pl_groups = self.calculator.compute(all_entries)
-        net_pl = compute_pl_net_profit(pl_groups)
-        if abs(net_pl) > 0.50:
-            tag = 'Profit' if net_pl > 0 else 'Loss'
-            log(f"Net {tag} \u20b9{abs(net_pl):,.2f} (computed from P&L ledgers)")
-            warnings.append(
-                f"Net {tag} \u20b9{abs(net_pl):,.2f} computed from P&L ledgers "
-                f"(shown in the Summary sheet)."
-            )
 
         log("Step 2/4: Validating")
         _, v_errors, v_warnings = self.validator.validate(all_entries)
