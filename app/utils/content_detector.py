@@ -143,6 +143,17 @@ def _classify(df: pd.DataFrame, file_path: str) -> str:
             scores['bs'] += 1
     if 'liabilit' in all_text and 'asset' in all_text:
         scores['bs'] += 8
+    # Financial-statement TITLE + PARTICULARS/AMOUNT header is decisive:
+    # "BALANCE SHEET As On ..." / "TRADING / PROFIT & LOSS From ..." exports
+    # (Genius/Miracle style) have no Dr/Cr columns and few keyword hits, so
+    # without this they fall through to the ledger parser and get mangled.
+    _stmt_title = any(t in all_text for t in
+                      ('balance sheet', 'profit & loss', 'profit and loss',
+                       'trading account', 'trading / profit'))
+    if _stmt_title and 'particulars' in all_text and 'amount' in all_text:
+        scores['bs'] += 12
+    elif _stmt_title:
+        scores['bs'] += 4
     if scores['bs'] >= 4:
         scores['tb'] += scores['bs']   # BS is a sub-type of TB
 
