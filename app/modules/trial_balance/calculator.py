@@ -160,6 +160,47 @@ _ALIASES: Dict[str, str] = {
     # Manufacturing
     'manufacturing expenses':          'MANUFACTURING EXPENSES',
 
+    # ── Master-reference ledger mappings (specific groups override the
+    #    generic expense-indicator guard) ───────────────────────────────────
+    'brokerage':                       'COMMISSION PAID',
+    'commission':                      'COMMISSION PAID',
+    'bank charges':                    'COMMISSION PAID',
+    'bank commission':                 'COMMISSION PAID',
+    'salary':                          'COMPENSATION TO EMPLOYEES',
+    'salary a/c':                      'COMPENSATION TO EMPLOYEES',
+    'salary a/c.':                     'COMPENSATION TO EMPLOYEES',
+    'bonus':                           'COMPENSATION TO EMPLOYEES',
+    'allowances':                      'COMPENSATION TO EMPLOYEES',
+    'audit fees':                      'INDIRECT EXPENSES',
+    'gst payment':                     'DUTIES AND TAXES',
+    'travelling exp.':                 'TRAVELLING',
+    'travelling':                      'TRAVELLING',
+    'transport exp.':                  'FREIGHT',
+    'transport charges':               'FREIGHT',
+    'hamali exp.':                     'FREIGHT',
+    'hamali':                          'FREIGHT',
+    'vahatuk':                         'FREIGHT',
+    'carriage outward':                'FREIGHT',
+    'interest paid a/c.':              'INTEREST PAID',
+    'interest received a/c':           'INTEREST RECEIVED',
+    'vehicle insurance':               'INSURANCE',
+    'stock insuranse':                 'INSURANCE',
+    'depreciation':                    'DEPRECIATION',
+    'bad debts':                       'BAD DEBTS',
+    'donation':                        'DONATION',
+    # Direct (trading) expenses per master reference
+    'checking charges':                'DIRECT EXPENSES (M)',
+    'mending charges':                 'DIRECT EXPENSES (M)',
+    'packing charges':                 'DIRECT EXPENSES (M)',
+    'butta cutting charges':           'DIRECT EXPENSES (M)',
+    'design pattern charges':          'DIRECT EXPENSES (M)',
+    'folding':                         'DIRECT EXPENSES (M)',
+    'winding':                         'DIRECT EXPENSES (M)',
+    'wiInding expenses':               'DIRECT EXPENSES (M)',
+    'widing expenses':                 'DIRECT EXPENSES (M)',
+    'warping charges':                 'DIRECT EXPENSES (M)',
+    'sizing warping charges':          'DIRECT EXPENSES (M)',
+
     # Direct Expenses (Manufacturing)
     'direct expenses (m)':             'DIRECT EXPENSES (M)',
     'direct expenses':                 'DIRECT EXPENSES (M)',
@@ -210,12 +251,11 @@ _KEYWORD_MAP = [
     (['sarafi', 'family loan', 'personal loan', 'director loan', 'friend loan',
       'home loan'],
      'UNSECURED LOANS'),
-    (['sundry creditor', 'karkhandar', 'broker'],
+    (['sundry creditor', 'karkhandar'],
      'SUNDRY CREDITORS'),
     (['sundry debtor'],
      'SUNDRY DEBTORS'),
-    (['fixed asset', 'plant', 'machinery', 'furniture', 'equipment',
-      'building', 'vehicle', 'computer'],
+    (['fixed asset'],
      'FIXED ASSETS'),
     (['opening stock'],
      'OPENING STOCK'),
@@ -240,13 +280,39 @@ _KEYWORD_MAP = [
 ]
 
 
+# Words that unambiguously mark a Profit & Loss EXPENSE ledger.
+# These must win over asset/creditor keyword guesses (e.g. "Computer Expenses"
+# is an expense, NOT a fixed asset; "Brokerage" is an expense, NOT a creditor).
+_EXPENSE_INDICATORS = (
+    'expenses', 'expense', 'exp.', ' exp', 'charges', 'charge',
+    'fees', 'fee', ' bill', 'bonus',
+)
+# Standalone ASSET ledger names (exact, after expense guard).
+_ASSET_TERMS = {
+    'computer', 'computers', 'furniture', 'furniture & fixtures', 'machinery',
+    'plant', 'plant & machinery', 'building', 'buildings', 'vehicle', 'vehicles',
+    'equipment', 'equipments', 'land', 'office equipment',
+}
+
+
 def _match(text: str) -> Optional[str]:
     """Return the canonical group for a single string, or None if unknown."""
     if not text:
         return None
     key = text.strip().lower()
+    # 1) Exact alias wins.
     if key in _ALIASES:
         return _ALIASES[key]
+    # 2) Expense indicator: any "...Expenses/Charges/Fees/Bill" ledger is a P&L
+    #    expense, never an asset or creditor. Guard runs before keyword guesses.
+    #    ('prepaid expenses' is an asset group and only ever arrives via the
+    #    Group column, which is matched before account names.)
+    if 'prepaid' not in key and any(ind in key for ind in _EXPENSE_INDICATORS):
+        return 'INDIRECT EXPENSES'
+    # 3) Standalone asset ledger names.
+    if key in _ASSET_TERMS:
+        return 'FIXED ASSETS'
+    # 4) Keyword substring fallback.
     for keywords, target in _KEYWORD_MAP:
         if any(kw in key for kw in keywords):
             return target
