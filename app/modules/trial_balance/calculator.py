@@ -95,6 +95,24 @@ _ALIASES: Dict[str, str] = {
     # Provisions / Duties & Taxes
     'provisions':                      'PROVISIONS',
     'duties and taxes':                'PROVISIONS',
+    'duty and taxes':                  'DUTIES AND TAXES',
+    'duty & taxes':                    'DUTIES AND TAXES',
+    # Expenditure / Expense group names (common misspellings)
+    'expinditure a/c':                 'INDIRECT EXPENSES',
+    'expenditure a/c':                 'INDIRECT EXPENSES',
+    'expinditure':                     'INDIRECT EXPENSES',
+    'expenditure':                     'INDIRECT EXPENSES',
+    # Net profit/loss entries → Capital
+    'z. net profit a/c':               'CAPITAL',
+    'net profit a/c':                  'CAPITAL',
+    'net loss a/c':                    'CAPITAL',
+    # Loan group names
+    'sarafi given':                    'UNSECURED LOANS',
+    'sarafi':                          'UNSECURED LOANS',
+    # Debtor group names
+    'debtors for cloth':               'SUNDRY DEBTORS',
+    'debtors for yarn':                'SUNDRY DEBTORS',
+    'debtors for sales':               'SUNDRY DEBTORS',
     # FIX: CURRENT LIABILITIES group in BS format maps to PROVISIONS (liability side)
     'current liabilities':             'PROVISIONS',
     'loans (liability)':               'UNSECURED LOANS',
@@ -141,6 +159,10 @@ _ALIASES: Dict[str, str] = {
     'bank a/c':                        'CASH AND BANK',
     'bank account':                    'CASH AND BANK',
     'bank':                            'CASH AND BANK',
+    'balance at bank/cash':            'CASH AND BANK',
+    'balance at bank / cash':          'CASH AND BANK',
+    'cash & bank balance':             'CASH AND BANK',
+    'cash and bank balance':           'CASH AND BANK',
 
     # Cash In Hand
     'cash in hand':                    'CASH IN HAND',
@@ -167,8 +189,8 @@ _ALIASES: Dict[str, str] = {
     # Sales
     'sales a/c':                       'SALES A/C',
     'sale a/c':                        'SALES A/C',
-    'sales':                           'SALES A/C',
     'sale account':                    'SALES A/C',
+    'sales':                           'SALES A/C',
     'sale account':                    'SALES A/C',
 
     # Purchases

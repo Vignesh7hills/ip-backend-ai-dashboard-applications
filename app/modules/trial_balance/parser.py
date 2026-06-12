@@ -492,17 +492,54 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
     if not name_clusters or not amt_clusters:
         return []
 
+    # ── Match name clusters to amount clusters by proximity ───────────────────
+    # Each name cluster pairs with the nearest amount cluster to its RIGHT.
+    # Skip name clusters that are noise: single-col, low text count, or contain
+    # only keywords like 'TOTAL' / 'Sr No'.
+    _NOISE_TEXTS = {'total', 'grand total', 'sr no', 'sr.no', 'page no', 'page'}
+
+    def _is_noise_cluster(cols):
+        """True if this name cluster is clearly a label/noise column, not a data column."""
+        total_texts = sum(text_ct[c] for c in cols)
+        if total_texts <= 1:
+            return True
+        # Check actual text values
+        sample = []
+        for ri in range(hdr_row + 1, min(hdr_row + 20, len(df))):
+            for c in cols:
+                v = str(df.iloc[ri, c]).strip()
+                if v and v.lower() not in ('nan', ''):
+                    sample.append(v.lower())
+        if sample and all(any(n in s for n in _NOISE_TEXTS) for s in sample):
+            return True
+        return False
+
+    valid_name_clusters = [cols for cols in name_clusters if not _is_noise_cluster(cols)]
+    if not valid_name_clusters:
+        valid_name_clusters = name_clusters  # fallback: use all
+
+    # Pair each valid name cluster with the nearest amt cluster to its right
     sides = []  # (name_cols, amt_cols, positive_to_debit, indented)
+
     def _indented(name_cols):
-        # Names occupy more than one column in the body → group is the outer
-        # column, leaves are indented. Otherwise names are 'flat' (single
-        # column) and header-vs-leaf is decided by amount presence.
         return sum(1 for c in name_cols if text_ct[c] > 0) > 1
-    # Left side: liabilities/capital → Credit on a BS, expenses → Debit on a P&L
-    sides.append((name_clusters[0], amt_clusters[0], is_pl, _indented(name_clusters[0])))
-    # Right side (assets → Debit on a BS, income → Credit on a P&L)
-    if len(name_clusters) >= 2 and len(amt_clusters) >= 2:
-        sides.append((name_clusters[1], amt_clusters[1], not is_pl, _indented(name_clusters[1])))
+
+    used_amt_clusters = set()
+    for name_cols in valid_name_clusters[:2]:   # max 2 sides
+        name_max = max(name_cols)
+        # Find nearest amt cluster starting after this name cluster
+        candidates = [(i, cols) for i, cols in enumerate(amt_clusters)
+                      if min(cols) > name_max and i not in used_amt_clusters]
+        if not candidates:
+            # Fallback: nearest amt cluster at all
+            candidates = [(i, cols) for i, cols in enumerate(amt_clusters)
+                          if i not in used_amt_clusters]
+        if not candidates:
+            continue
+        best_i, best_cols = min(candidates, key=lambda x: abs(min(x[1]) - name_max))
+        used_amt_clusters.add(best_i)
+        is_dr = is_pl if len(sides) == 0 else not is_pl
+        sides.append((name_cols, best_cols, is_dr, _indented(name_cols)))
 
     entries: List[TrialBalanceEntry] = []
     # Track group header totals so a group with detail rows does not also emit
@@ -542,27 +579,28 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
                 continue
 
             if indented:
-                # Group header in the OUTERMOST name column; sub-ledgers indented.
                 outer = min(name_cols)
                 group_txt = next((t for c, t in present if c == outer), None)
                 leaf_txt  = next((t for c, t in present if c > outer), None)
-                if leaf_txt and not _is_skip(leaf_txt):
+                if leaf_txt and not _is_skip(leaf_txt) and not _is_profit_row(leaf_txt):
                     if group_txt and not _is_skip(group_txt):
                         cur_group[si] = group_txt
                     g = cur_group[si] or group_txt or leaf_txt
                     if amt != 0.0:
                         _emit(leaf_txt, g, amt, ptd)
                         group_leaves[g] = group_leaves.get(g, 0) + 1
-                elif group_txt and not _is_skip(group_txt):
+                elif group_txt and not _is_skip(group_txt) and not _is_profit_row(group_txt):
                     cur_group[si] = group_txt
                     if amt != 0.0:
                         group_total[group_txt] = (amt, ptd)
             else:
-                # FLAT layout (names share one column): a row with a name but NO
-                # amount is a group header; a name WITH an amount is a leaf under
-                # the most recent header.
+                # FLAT layout: no amount → group header; with amount → leaf.
                 name = present[0][1]
                 if _is_skip(name):
+                    continue
+                # Skip derived profit/loss summary rows (GROSS PROFIT, NET PROFIT lines
+                # with amounts are P&L totals, not ledger entries)
+                if _is_profit_row(name):
                     continue
                 if amt == 0.0:
                     cur_group[si] = name           # group header line
