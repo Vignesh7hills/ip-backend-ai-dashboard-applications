@@ -128,6 +128,16 @@ _ALIASES: Dict[str, str] = {
     'direct expenses':                 'DIRECT EXPENSES (M)',
     'indirect incomes':                'INDIRECT INCOMES',
     'indirect expenses':               'INDIRECT EXPENSES',
+    # Reserve & Surplus = secured bank loan (term loan) in Tally BS
+    'reserve & surplus':               'SECURED LOANS',
+    'reserves & surplus':              'SECURED LOANS',
+    # Broker A/C = Sundry Creditors (brokerage payable)
+    'broker a/c':                      'SUNDRY CREDITORS',
+    'brokers a/c':                     'SUNDRY CREDITORS',
+    # Labour & Advances = Loans and Advances (Assets)
+    'labour & advances':               'LOANS AND ADVANCES (ASSETS)',
+    'labour and advances':             'LOANS AND ADVANCES (ASSETS)',
+    'labour advances':                 'LOANS AND ADVANCES (ASSETS)',
 
     # Fixed Assets
     'fixed assets':                    'FIXED ASSETS',
@@ -186,12 +196,36 @@ _ALIASES: Dict[str, str] = {
     'stock in hand (closing)':         'CLOSING STOCK',
     'stock in hand ( closing )':       'CLOSING STOCK',
 
-    # Sales
+    # Sales — all common variations
     'sales a/c':                       'SALES A/C',
     'sale a/c':                        'SALES A/C',
     'sale account':                    'SALES A/C',
     'sales':                           'SALES A/C',
-    'sale account':                    'SALES A/C',
+    'cloth sale a/c':                  'SALES A/C',
+    'cloth sales a/c':                 'SALES A/C',
+    'cloth sale':                      'SALES A/C',
+    'yarn sale a/c':                   'SALES A/C',
+    'yarn sales a/c':                  'SALES A/C',
+    'yarn sale':                       'SALES A/C',
+    'sample cloth sale a/c':           'SALES A/C',
+    'yarn sale ( sized yarn )':        'SALES A/C',
+    # Closing stock (right/income side of P&L)
+    'stock in hand':                   'CLOSING STOCK',
+    'stock in hand a/c':               'CLOSING STOCK',
+    # Direct & indirect income (right side of P&L)
+    'cloth jobwork received':          'DIRECT INCOMES',
+    'job weaving charges (claim)':     'DIRECT INCOMES',
+    'sizing warping charges (claim)':  'DIRECT INCOMES',
+    'direct expinditure':              'DIRECT INCOMES',  # right-side claim income
+    'indirect expences':               'INDIRECT INCOMES',
+    'indirect income':                 'INDIRECT INCOMES',
+    'other income':                    'INDIRECT INCOMES',
+    'gst round off':                   'INDIRECT INCOMES',
+    'intrest late bill ( gst )':       'INDIRECT INCOMES',
+    'interest on income tax':          'INDIRECT INCOMES',
+    'rate difference (sale/purchase':  'INDIRECT INCOMES',
+    'sundry creditors write-off':      'INDIRECT INCOMES',
+    'discount a/c':                    'INDIRECT INCOMES',
 
     # Purchases
     'purchase a/c':                    'PURCHASE A/C',
