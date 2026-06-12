@@ -306,7 +306,7 @@ _KEYWORD_MAP = [
      'CASH IN HAND'),
     (['cash and bank', 'cash & bank'],
      'CASH AND BANK'),
-    (['loans and advance', 'loans & advance'],
+    (['loans and advance', 'loans & advance', 'loans / advance'],
      'LOANS AND ADVANCES (ASSETS)'),
     (['manufacture', 'manufacturing'],
      'MANUFACTURING EXPENSES'),
@@ -338,6 +338,58 @@ _KEYWORD_MAP = [
     (['freight', 'cartage', 'hamali', 'vahatook', 'vahatuk', 'transport'],
      'FREIGHT'),
 ]
+
+# ── Context-aware group inference ─────────────────────────────────────────────
+# When a ledger/account name matches none of the above, we try to infer group
+# from the CONTEXT GROUP that the parser supplied. This handles cases where
+# Format J correctly sets group="SUNDRY CREDITORS" for person names, but the
+# name itself has no keyword signal. The _normalise function uses the raw group
+# first (which IS the canonical group from the parser), so this is automatic.
+# The mapping below additionally handles "As Per Schedule X" references whose
+# group is the section header name.
+
+_SCHEDULE_SECTION_MAP: Dict[str, str] = {
+    # Map section-header group names → canonical Genius groups
+    # These are set by Format J parser as raw group names
+    'CAPITAL': 'CAPITAL',
+    'CAPITAL ACCOUNT': 'CAPITAL',
+    'PARTNERS CAPITAL': 'CAPITAL',
+    'CURRENT LIABILITIES': 'PROVISIONS',
+    'DUTIES AND TAXES': 'DUTIES AND TAXES',
+    'BROKERS (SALE COMMISSION AGENTS)': 'SUNDRY CREDITORS',
+    'PROVISION': 'PROVISIONS',
+    'SUNDRY CREDITORS': 'SUNDRY CREDITORS',
+    'SUNDRY CREDITORS MILL': 'SUNDRY CREDITORS',
+    'SUNDRY PAYABLES': 'SUNDRY CREDITORS',
+    'LOANS LIABILITIES': 'UNSECURED LOANS',
+    'CURRENT ASSETS': 'OTHER CURRENT ASSETS',
+    'CASH & BANK BALANCES': 'CASH AND BANK',
+    'CASH AND BANK BALANCES': 'CASH AND BANK',
+    'LOANS / ADVANCES A/C': 'LOANS AND ADVANCES (ASSETS)',
+    'LOANS AND ADVANCES A/C': 'LOANS AND ADVANCES (ASSETS)',
+    'SUNDRY DEBTORS': 'SUNDRY DEBTORS',
+    'SUNDRY RECEIVABLES': 'SUNDRY DEBTORS',
+    'FIXED ASSETS': 'FIXED ASSETS',
+    'OTHER CURRENT ASSETS': 'OTHER CURRENT ASSETS',
+    'STOCK IN HAND': 'CLOSING STOCK',
+    'OPENING STOCK': 'OPENING STOCK',
+    'CLOSING STOCK': 'CLOSING STOCK',
+    'EXPENSES DIRECT': 'DIRECT EXPENSES (M)',
+    'EXPENSES DIRECT (T&M)': 'DIRECT EXPENSES (M)',
+    'EXPENSES INDIRECT': 'INDIRECT EXPENSES',
+    'EXPENSES INDIRECT (P&L)': 'INDIRECT EXPENSES',
+    'OTHER INCOME': 'INDIRECT INCOMES',
+    'INDIRECT INCOME': 'INDIRECT INCOMES',
+    'INDIRECT INCOMES': 'INDIRECT INCOMES',
+    'SALES': 'SALES A/C',
+    'SALES A/C': 'SALES A/C',
+    'PURCHASE': 'PURCHASE A/C',
+    'PURCHASE A/C': 'PURCHASE A/C',
+    'DIRECT EXPENSES (M)': 'DIRECT EXPENSES (M)',
+    'INDIRECT EXPENSES': 'INDIRECT EXPENSES',
+    'INVESTMENTS': 'INVESTMENTS',
+}
+
 
 
 # Words that unambiguously mark a Profit & Loss EXPENSE ledger.
@@ -400,15 +452,58 @@ def _normalise(group: str, account_name: str = '') -> str:
     matched = _match(group)
     if matched:
         return matched
-    # 2) No usable group (e.g. a PDF/CSV with no Group column) →
-    #    classify by the ledger/account name instead of dumping to UNGROUPED.
+
+    # 1b) If the group name itself is a section-header canonical name
+    #     (set by Format J parser), resolve it directly.
+    grp_upper = (group or '').strip().upper()
+    if grp_upper in _SCHEDULE_SECTION_MAP:
+        return _SCHEDULE_SECTION_MAP[grp_upper]
+
+    # 2) No usable group → classify by the ledger/account name.
     matched = _match(account_name)
     if matched:
         return matched
-    # 3) Keep an explicit-but-unknown group as-is; otherwise leave ungrouped.
+
+    # 2b) Additional account-name heuristics for common unresolved cases:
+    akey = (account_name or '').strip().lower()
+
+    # Bank account names (HDFC Bank Ltd, ICICI Bank, SBI etc.)
+    if any(b in akey for b in ('bank ltd', 'bank limited', ' bank', 'hdfc', 'icici',
+                                'sbi', 'axis bank', 'kotak', 'yes bank', 'ubi',
+                                'union bank', 'state bank', 'canara', 'pnb',
+                                'punjab national', 'idbi', 'indusind')):
+        # Bank OD/OCC → Secured Loans; savings/current → Cash and Bank
+        if any(x in akey for x in ('od', 'occ', 'overdraft', 'cc a/c', 'cash credit')):
+            return 'SECURED LOANS'
+        return 'CASH AND BANK'
+
+    # Partners Capital entries
+    if 'partners capital' in akey or ('capital' in akey and 'partner' in akey):
+        return 'CAPITAL'
+
+    # "As Per Schedule X" — group comes from section context (already in grp_upper)
+    # If group is already set to a valid canonical group, use it
+    if akey.startswith('as per schedule') and grp_upper and grp_upper != 'UNGROUPED':
+        return grp_upper
+
+    # Person/party names under Sundry Creditors/Debtors context
+    # (Group J parser sets group correctly; if it's already SUNDRY_*, use it)
+    if grp_upper in ('SUNDRY CREDITORS', 'SUNDRY DEBTORS',
+                     'LOANS AND ADVANCES (ASSETS)', 'UNSECURED LOANS',
+                     'CAPITAL', 'PROVISIONS', 'CASH AND BANK',
+                     'OTHER CURRENT ASSETS', 'FIXED ASSETS', 'INVESTMENTS',
+                     'DUTIES AND TAXES', 'OPENING STOCK', 'CLOSING STOCK',
+                     'DIRECT EXPENSES (M)', 'INDIRECT EXPENSES',
+                     'INDIRECT INCOMES', 'SALES A/C', 'PURCHASE A/C',
+                     'BALANCE WITH REVENUE AUTHORITY', 'DEPOSITS',
+                     'MANUFACTURING EXPENSES', 'DIRECT INCOMES'):
+        return grp_upper
+
+    # 3) Keep an explicit-but-unknown group as-is; otherwise UNGROUPED.
     if group and group.strip():
         return group.strip().upper()
     return 'UNGROUPED'
+
 
 
 class TrialBalanceCalculator:
