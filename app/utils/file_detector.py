@@ -71,11 +71,11 @@ def detect_file_type(filename: str, content: bytes = b'') -> str:
         except UnicodeDecodeError:
             pass
 
-    raise UnsupportedFileTypeError(
-        f"File type '{ext or 'unknown'}' is not supported. "
-        f"Accepted formats: PDF, Excel (xlsx/xls/xlsm/ods), CSV, TSV, TXT.",
-        {"filename": filename, "allowed": list(_EXT_MAP.keys())},
-    )
+    # ── Never hard-fail on format: default by extension family, otherwise
+    #    assume Excel so the parser (which has multi-engine fallbacks) can try. ─
+    if ext in _EXT_MAP:
+        return _EXT_MAP[ext]
+    return 'excel'
 
 
 def _detect_magic(content: bytes, ext: str) -> str:
