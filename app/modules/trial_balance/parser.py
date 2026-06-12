@@ -56,6 +56,7 @@ _ASSET_KW = ['asset', 'assets']
 
 _SKIP_ROW_KW = {
     'total', 'grand total', 'sub total', 'subtotal', 'net total',
+    'print date', 'print date :', 'page no', 'page no.',
 }
 # Profit/Loss rows are skipped ONLY when they carry no amount (derived rows).
 # When they DO have an amount (e.g. "Net Profit" Dr in a TB, "Profit & Loss A/c"
@@ -493,51 +494,62 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
         return []
 
     # ── Match name clusters to amount clusters by proximity ───────────────────
-    # Each name cluster pairs with the nearest amount cluster to its RIGHT.
-    # Skip name clusters that are noise: single-col, low text count, or contain
-    # only keywords like 'TOTAL' / 'Sr No'.
-    _NOISE_TEXTS = {'total', 'grand total', 'sr no', 'sr.no', 'page no', 'page'}
+    # Filter noise clusters: too few entries, or only 'TOTAL'/'GRAND TOTAL' text.
+    _NOISE_TEXTS = {'total', 'grand total', 'sr no', 'sr.no', 'page no', 'page',
+                    'print date', 'print'}
 
     def _is_noise_cluster(cols):
-        """True if this name cluster is clearly a label/noise column, not a data column."""
         total_texts = sum(text_ct[c] for c in cols)
         if total_texts <= 1:
             return True
-        # Check actual text values
+        # Scan full body for text values in these columns
         sample = []
-        for ri in range(hdr_row + 1, min(hdr_row + 20, len(df))):
+        for ri in range(hdr_row + 1, len(df)):
             for c in cols:
                 v = str(df.iloc[ri, c]).strip()
                 if v and v.lower() not in ('nan', ''):
                     sample.append(v.lower())
-        if sample and all(any(n in s for n in _NOISE_TEXTS) for s in sample):
+        # Empty sample (no values found in body) → noise
+        if not sample:
+            return True
+        # All values are noise keywords → noise
+        if all(any(n in s for n in _NOISE_TEXTS) for s in sample):
             return True
         return False
 
-    valid_name_clusters = [cols for cols in name_clusters if not _is_noise_cluster(cols)]
-    if not valid_name_clusters:
-        valid_name_clusters = name_clusters  # fallback: use all
+    def _is_noise_amt_cluster(cols):
+        """Skip amount clusters that are clearly TOTAL/summary-only columns."""
+        total_nums = sum(num_ct[c] for c in cols)
+        return total_nums <= 2  # only a TOTAL row — not a real data column
 
-    # Pair each valid name cluster with the nearest amt cluster to its right
+    valid_name_clusters = [cols for cols in name_clusters if not _is_noise_cluster(cols)]
+    valid_amt_clusters  = [cols for cols in amt_clusters  if not _is_noise_amt_cluster(cols)]
+    if not valid_name_clusters:
+        valid_name_clusters = name_clusters
+    if not valid_amt_clusters:
+        valid_amt_clusters = amt_clusters
+
+    # Pair each valid name cluster with the nearest SUBSTANTIAL amt cluster to its right.
+    # If no amt cluster is to the right, fall back to the nearest at all.
     sides = []  # (name_cols, amt_cols, positive_to_debit, indented)
 
     def _indented(name_cols):
         return sum(1 for c in name_cols if text_ct[c] > 0) > 1
 
-    used_amt_clusters = set()
+    used_amt_idx = set()
     for name_cols in valid_name_clusters[:2]:   # max 2 sides
         name_max = max(name_cols)
-        # Find nearest amt cluster starting after this name cluster
-        candidates = [(i, cols) for i, cols in enumerate(amt_clusters)
-                      if min(cols) > name_max and i not in used_amt_clusters]
+        # Prefer amt clusters starting AFTER this name cluster
+        candidates = [(i, cols) for i, cols in enumerate(valid_amt_clusters)
+                      if min(cols) > name_max and i not in used_amt_idx]
         if not candidates:
-            # Fallback: nearest amt cluster at all
-            candidates = [(i, cols) for i, cols in enumerate(amt_clusters)
-                          if i not in used_amt_clusters]
+            # Fallback: nearest available
+            candidates = [(i, cols) for i, cols in enumerate(valid_amt_clusters)
+                          if i not in used_amt_idx]
         if not candidates:
             continue
         best_i, best_cols = min(candidates, key=lambda x: abs(min(x[1]) - name_max))
-        used_amt_clusters.add(best_i)
+        used_amt_idx.add(best_i)
         is_dr = is_pl if len(sides) == 0 else not is_pl
         sides.append((name_cols, best_cols, is_dr, _indented(name_cols)))
 
@@ -598,9 +610,18 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
                 name = present[0][1]
                 if _is_skip(name):
                     continue
-                # Skip derived profit/loss summary rows (GROSS PROFIT, NET PROFIT lines
-                # with amounts are P&L totals, not ledger entries)
+                # Skip single-char noise like '.' used as total separator rows
+                if len(name.strip('.').strip()) == 0:
+                    continue
+                # Skip print/page footer rows
+                if re.match(r'^(print\s+date|page\s+no|page\s*:)', name.lower()):
+                    continue
+                # Skip derived profit/loss summary rows
                 if _is_profit_row(name):
+                    continue
+                # 'PARTICULARS' is the column header — treat as group-label reset only
+                if name.lower() in ('particulars', 'amount', 'amount rs', 'amount rs.'):
+                    cur_group[si] = ''
                     continue
                 if amt == 0.0:
                     cur_group[si] = name           # group header line
