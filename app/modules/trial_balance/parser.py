@@ -56,8 +56,11 @@ _ASSET_KW = ['asset', 'assets']
 
 _SKIP_ROW_KW = {
     'total', 'grand total', 'sub total', 'subtotal', 'net total',
-    'gross profit', 'net profit', 'net loss',
 }
+# Profit/Loss rows are skipped ONLY when they carry no amount (derived rows).
+# When they DO have an amount (e.g. "Net Profit" Dr in a TB, "Profit & Loss A/c"
+# Dr balance in Tally) they must be kept as real entries.
+_PROFIT_ONLY_KW = {'gross profit', 'net profit', 'net loss'}
 
 _DOTS_RE   = re.compile(r'(\s*\.\s*){2,}')
 _NUM_RE    = re.compile(r'^-?[\d,]+\.?\d*$')
@@ -81,6 +84,8 @@ _PROFIT_KW = {'gross profit', 'net profit', 'net loss'}
 
 
 def _is_skip(name: str) -> bool:
+    """Return True only for pure total rows. Profit/Loss rows are NOT skipped
+    here — callers must check _is_profit_row separately and skip only when amount=0."""
     nl = name.lower().strip()
     return any(kw in nl for kw in _SKIP_ROW_KW)
 
@@ -431,12 +436,14 @@ def _filename_is_pl(source: str):
     Per the client rule: a P&L file means Left=Dr / Right=Cr; a Balance Sheet
     means Left=Cr / Right=Dr. Filenames carry 'pl'/'p&l'/'profit'/'trading' or
     'bs'/'bl'/'balance'.
+
+    BL/bl = Balance (Sheet) — treated same as BS.
     """
     s = (source or '').lower()
     pl_keys = ('p & l', 'p&l', 'profit', 'pandl', 'p and l', '-pl', '_pl',
-               ' pl', 'pl.', 'p.l', 'p_l', 'trading')
+               ' pl', 'pl.', 'p.l', 'p_l', 'trading', 'p-l')
     bs_keys = ('balance', '-bs', '_bs', ' bs', 'bs.', 'b.s', 'b_s',
-               '-bl', '_bl', 'b/s')
+               '-bl', '_bl', ' bl', 'bl.', 'b.l', 'b_l', 'b/s', 'bsheet')
     if any(k in s for k in pl_keys):
         return True
     if any(k in s for k in bs_keys):
@@ -1178,25 +1185,394 @@ def _parse_section_header_format(text: str) -> List[TrialBalanceEntry]:
     return entries
 
 
+# ── Format I: Tally Single-Column Indented Trial Balance ──────────────────────
+# Layout (from TrialBal.xlsx sample):
+#   Col0=Particulars, Col1=Debit closing, Col2=Credit closing
+#   Parent rows have BOTH col1+col2 non-zero (group total in col2)
+#   OR sum of following leaf rows equals the parent's single-col amount.
+#   Leaf rows have ONLY col1 (Debit) or col2 (Credit) non-zero.
+
+def _is_tally_single_col_tb(df: pd.DataFrame) -> bool:
+    """Return True if df looks like a Tally 3-col indented Trial Balance."""
+    for ri in range(min(12, len(df))):
+        row = [str(c).strip().lower() for c in df.iloc[ri]]
+        if not any('particular' in c for c in row):
+            continue
+        for ri2 in range(ri, min(ri + 5, len(df))):
+            row2 = [str(c).strip().lower() for c in df.iloc[ri2]]
+            if any('debit' in c or 'closing' in c for c in row2[1:3]):
+                return True
+    return False
+
+
+def _parse_tally_single_col_tb(df: pd.DataFrame, source: str = '') -> List[TrialBalanceEntry]:
+    """
+    Parse Tally 3-column indented TB (Format I).
+
+    col0 = Account / Group name
+    col1 = Debit closing balance (leaf) or sub-total (parent)
+    col2 = Credit closing balance (leaf) or group total (parent)
+
+    Two-pass approach:
+      Pass 1: Build flat list of (orig_row_idx, name, dr, cr)
+      Pass 2: Mark rows as PARENT when:
+        (a) Both col1 AND col2 are non-zero (signal A), OR
+        (b) The row's amount equals the sum of immediately following
+            single-col rows (signal B / lookahead sum match)
+      Pass 3: Emit only LEAF rows as TB entries; parents set current_group.
+    """
+    # Locate the header row (has "particulars")
+    hdr_row = -1
+    for ri in range(min(15, len(df))):
+        row = [str(c).strip().lower() for c in df.iloc[ri]]
+        if any('particular' in c for c in row):
+            hdr_row = ri
+            break
+    if hdr_row < 0:
+        return []
+
+    # ── Pass 1: collect raw rows ──────────────────────────────────────────────
+    raw: List[Tuple[int, str, float, float]] = []  # (orig_row_idx, name, dr, cr)
+    for row_idx in range(hdr_row + 1, len(df)):
+        row = list(df.iloc[row_idx])
+        while len(row) < 3:
+            row.append('')
+
+        name_raw = str(row[0]).strip()
+        if name_raw.lower() in ('nan', ''):
+            continue
+        name = _clean(name_raw)
+        if not name:
+            continue
+        if re.match(r'^\d{1,2}[-/][A-Za-z]', name) or re.match(r'^\d{4}$', name):
+            continue
+        if _is_total_row(name):
+            continue
+
+        dr = parse_amount(str(row[1]).strip() if len(row) > 1 else '')
+        cr = parse_amount(str(row[2]).strip() if len(row) > 2 else '')
+        raw.append((row_idx, name, dr, cr))
+
+    if not raw:
+        return []
+
+    # ── Pass 2: classify parent vs leaf ───────────────────────────────────────
+    n = len(raw)
+    is_parent = [False] * n
+
+    for i in range(n):
+        _, _, dr_i, cr_i = raw[i]
+        # Signal A: both cols non-zero → definitely a parent row
+        if dr_i != 0.0 and cr_i != 0.0:
+            is_parent[i] = True
+            continue
+        # Signal B: single-col row whose amount ≈ sum of following rows
+        parent_amt = dr_i if dr_i != 0.0 else cr_i
+        if parent_amt == 0.0:
+            continue
+        running = 0.0
+        for j in range(i + 1, min(i + 80, n)):
+            _, _, dr_j, cr_j = raw[j]
+            # Stop at next signal-A row
+            if dr_j != 0.0 and cr_j != 0.0:
+                break
+            child_amt = dr_j if dr_j != 0.0 else cr_j
+            running += child_amt
+            tol = max(1.0, parent_amt * 0.002)
+            if abs(running - parent_amt) <= tol:
+                is_parent[i] = True
+                break
+            if running > parent_amt * 1.02 + 500:
+                break
+
+    # ── Pass 3: emit entries ──────────────────────────────────────────────────
+    entries: List[TrialBalanceEntry] = []
+    current_group = ''
+    # Track signal-A parents for fallback (if no leaves parsed under them)
+    group_totals: Dict[str, Tuple[float, float]] = {}
+    group_counts: Dict[str, int] = {}
+
+    for i, (_, name, dr, cr) in enumerate(raw):
+        if is_parent[i]:
+            current_group = name
+            _, _, p_dr, p_cr = raw[i]
+            group_totals[name] = (p_dr, p_cr)
+            group_counts.setdefault(name, 0)
+            continue
+
+        # Leaf row
+        if dr == 0.0 and cr == 0.0:
+            # No amount — treat as sub-group label
+            current_group = name
+            group_counts.setdefault(name, 0)
+            continue
+
+        e = TrialBalanceEntry(account_name=name, group=current_group)
+        if dr != 0.0 and cr == 0.0:
+            e.debit = dr
+        elif cr != 0.0 and dr == 0.0:
+            e.credit = cr
+        else:
+            net = dr - cr
+            if net >= 0:
+                e.debit = net
+            else:
+                e.credit = abs(net)
+
+        entries.append(e)
+        if current_group:
+            group_counts[current_group] = group_counts.get(current_group, 0) + 1
+
+    # ── Fallback: groups with no leaf entries → emit group total ──────────────
+    for grp, (p_dr, p_cr) in group_totals.items():
+        if group_counts.get(grp, 0) == 0:
+            e = TrialBalanceEntry(account_name=grp, group=grp)
+            if p_cr >= p_dr:
+                e.credit = p_cr
+            else:
+                e.debit = p_dr
+            entries.append(e)
+            logger.info("Format I group-total fallback: %s Dr=%.2f Cr=%.2f",
+                        grp, p_dr, p_cr)
+
+    logger.info("Format I (Tally single-col TB) parsed %d entries from %s",
+                len(entries), source)
+    return entries
+
+
+# ── Format I-PDF: Tally Single-Column Trial Balance PDF ───────────────────────
+# Identical structure to the XLS Format I but extracted from PDF word positions.
+# Page layout:
+#   Name words at x < dr_col_x
+#   Debit amount word right-aligned near x ≈ dr_col_x
+#   Credit amount word right-aligned near x ≈ cr_col_x
+# Detection: page 1 has both "Debit" and "Credit" headers on the same line,
+# with NO "PARTICULARS" / "AMOUNT" two-column header (which Format H covers).
+
+_IND_NUM_RE = re.compile(
+    # Matches: optional negative/paren, digits with Indian comma grouping, optional decimal
+    # Handles: 7,06,846.00  90,00,404.29  2,52,65,556.00  1,37,21,110.00  37,93,384.76
+    r'^\(?-?\d{1,3}(?:,\d{2,3})*(?:\.\d+)?\)?$'
+)
+
+
+def _parse_indian_amount(text: str) -> float:
+    """Parse Indian lakh-formatted number like 90,00,404.29 → 9000404.29."""
+    t = text.strip().lstrip('(').rstrip(')')
+    negative = text.strip().startswith('(') and text.strip().endswith(')')
+    # Remove ALL commas — Indian format uses commas at 2-digit groups
+    t = t.replace(',', '')
+    try:
+        val = float(t)
+        return -val if negative else val
+    except ValueError:
+        return 0.0
+
+
+def _detect_tally_single_col_tb_pdf(file_path: str):
+    """Return (debit_x, credit_x) split point or None if not this format."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(file_path) as pdf:
+            if not pdf.pages:
+                return None
+            words = pdf.pages[0].extract_words()
+            # Find "Debit" and "Credit" header words
+            dr_word = next((w for w in words if w['text'].strip().lower() == 'debit'), None)
+            cr_word = next((w for w in words if w['text'].strip().lower() == 'credit'), None)
+            if not dr_word or not cr_word:
+                return None
+            dr_x = float(dr_word['x0'])
+            cr_x = float(cr_word['x0'])
+            # Sanity: credit header must be to the right of debit header
+            if cr_x <= dr_x:
+                return None
+            # The split between Dr and Cr amounts is midway between headers
+            split_x = (dr_x + cr_x) / 2.0
+            return dr_x, cr_x, split_x
+    except Exception:
+        return None
+
+
+def _parse_tally_single_col_pdf(file_path: str) -> List[TrialBalanceEntry]:
+    """
+    Parse Tally-exported single-column Trial Balance PDF (Format I-PDF).
+
+    Uses word x-positions to assign each amount to Debit or Credit column,
+    then applies the same two-pass parent/leaf detection as the XLS Format I.
+
+    Indian lakh format (90,00,404.29) is handled by _parse_indian_amount.
+    """
+    import pdfplumber
+
+    layout = _detect_tally_single_col_tb_pdf(file_path)
+    if not layout:
+        return []
+
+    dr_header_x, cr_header_x, split_x = layout
+
+    # ── Pass 1: collect (name, dr, cr) for every row across all pages ─────────
+    raw: List[Tuple[int, str, float, float]] = []
+    order = 0
+
+    _SKIP_TEXT = {
+        'debit', 'credit', 'closing', 'balance', 'particulars',
+        'page', 'carried', 'over', 'continued', 'brought', 'forward',
+        'trial', 'grand', 'total',
+    }
+
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(keep_blank_chars=False)
+            if not words:
+                continue
+
+            # Cluster words into rows by y-position (tolerance 3pt)
+            words.sort(key=lambda w: (round(float(w['top']) / 3) * 3, float(w['x0'])))
+            rows: Dict[int, list] = {}
+            for w in words:
+                y_key = round(float(w['top']) / 3) * 3
+                rows.setdefault(y_key, []).append(w)
+
+            for y_key in sorted(rows.keys()):
+                row_w = sorted(rows[y_key], key=lambda w: float(w['x0']))
+
+                # Name words are left of the Debit column (with 60pt margin)
+                # Amount words match the Indian number pattern
+                name_cutoff = dr_header_x - 60  # well left of first amount column
+                name_words = [w for w in row_w if float(w['x0']) < name_cutoff
+                              and not _IND_NUM_RE.match(w['text'].replace(' ',''))]
+                amt_words   = [w for w in row_w
+                               if _IND_NUM_RE.match(w['text'].replace(' ',''))]
+
+                if not amt_words and not name_words:
+                    continue
+
+                # Build name from left-side text words
+                name = _clean(' '.join(w['text'] for w in name_words).strip())
+                if not name:
+                    continue
+                nl = name.lower().strip()
+                # Skip header/footer rows
+                if any(sk in nl for sk in _SKIP_TEXT):
+                    continue
+                if _is_total_row(name):
+                    continue
+                if re.match(r'^\d{1,2}[-/][A-Za-z]', name):
+                    continue
+
+                # Assign each amount word to Dr or Cr by x-position
+                dr_val = cr_val = 0.0
+                for aw in amt_words:
+                    ax = float(aw['x0'])
+                    amt = _parse_indian_amount(aw['text'])
+                    if ax < split_x:
+                        dr_val = amt   # left of split → Debit
+                    else:
+                        cr_val = amt   # right of split → Credit
+
+                raw.append((order, name, dr_val, cr_val))
+                order += 1
+
+    if not raw:
+        return []
+
+    # ── Pass 2: detect parents (same logic as XLS Format I) ──────────────────
+    n = len(raw)
+    is_parent = [False] * n
+
+    for i in range(n):
+        _, _, dr_i, cr_i = raw[i]
+        # Signal A: both non-zero → parent
+        if dr_i != 0.0 and cr_i != 0.0:
+            is_parent[i] = True
+            continue
+        # Signal B: sum-match lookahead
+        parent_amt = dr_i if dr_i != 0.0 else cr_i
+        if parent_amt == 0.0:
+            continue
+        running = 0.0
+        for j in range(i + 1, min(i + 80, n)):
+            _, _, dr_j, cr_j = raw[j]
+            if dr_j != 0.0 and cr_j != 0.0:
+                break
+            child_amt = dr_j if dr_j != 0.0 else cr_j
+            running += child_amt
+            tol = max(1.0, parent_amt * 0.002)
+            if abs(running - parent_amt) <= tol:
+                is_parent[i] = True
+                break
+            if running > parent_amt * 1.02 + 500:
+                break
+
+    # ── Pass 3: emit leaf entries ─────────────────────────────────────────────
+    entries: List[TrialBalanceEntry] = []
+    current_group = ''
+    group_totals: Dict[str, Tuple[float, float]] = {}
+    group_counts: Dict[str, int] = {}
+
+    for i, (_, name, dr, cr) in enumerate(raw):
+        if is_parent[i]:
+            current_group = name
+            group_totals[name] = (dr, cr)
+            group_counts.setdefault(name, 0)
+            continue
+
+        if dr == 0.0 and cr == 0.0:
+            current_group = name
+            group_counts.setdefault(name, 0)
+            continue
+
+        e = TrialBalanceEntry(account_name=name, group=current_group)
+        if dr != 0.0 and cr == 0.0:
+            e.debit = dr
+        elif cr != 0.0 and dr == 0.0:
+            e.credit = cr
+        else:
+            net = dr - cr
+            if net >= 0:
+                e.debit = net
+            else:
+                e.credit = abs(net)
+        entries.append(e)
+        if current_group:
+            group_counts[current_group] = group_counts.get(current_group, 0) + 1
+
+    # Fallback for groups with no leaf entries
+    for grp, (p_dr, p_cr) in group_totals.items():
+        if group_counts.get(grp, 0) == 0:
+            e = TrialBalanceEntry(account_name=grp, group=grp)
+            if p_cr >= p_dr:
+                e.credit = p_cr
+            else:
+                e.debit = p_dr
+            entries.append(e)
+            logger.info("Format I-PDF group fallback: %s Dr=%.2f Cr=%.2f", grp, p_dr, p_cr)
+
+    logger.info("Format I-PDF parsed %d entries from %s", len(entries), file_path)
+    return entries
+
+
 # ── Main parser ───────────────────────────────────────────────────────────────
 
 class TrialBalanceParser:
 
     def parse_file(self, file_path: str) -> List[TrialBalanceEntry]:
-        ext = file_path.rsplit('.', 1)[-1].lower()
+        # Normalise extension — handles .XLS, .XLSX uppercase, no-extension, etc.
+        raw_ext = file_path.rsplit('.', 1)[-1].lower() if '.' in file_path else ''
+        # Strip query-string artefacts like "file.xlsx?t=123"
+        raw_ext = raw_ext.split('?')[0].split('&')[0].strip()
 
-        if ext == 'pdf':
+        if raw_ext == 'pdf':
             return self._parse_pdf(file_path)
 
-        df = self._read_tabular(file_path, ext)
+        df = self._read_tabular(file_path, raw_ext)
         df = df.fillna('').map(lambda x: str(x).strip())
         return self._parse_dataframe(df, file_path)
 
     def _read_tabular(self, file_path: str, ext: str) -> pd.DataFrame:
         """Read any tabular file, trying multiple engines so we never reject a
-        format outright. Order: native engine → the other Excel engine →
-        HTML tables (Tally/Busy often export HTML as .xls) → CSV/TSV text."""
-        attempts = []
+        format outright. For unknown/missing extensions, ALL strategies are tried."""
         if ext in ('xlsx', 'xlsm', 'ods'):
             attempts = [('excel', 'openpyxl'), ('excel', 'xlrd'), ('html', None), ('csv', None)]
         elif ext == 'xls':
@@ -1204,6 +1580,7 @@ class TrialBalanceParser:
         elif ext in ('csv', 'tsv', 'txt'):
             attempts = [('csv', None), ('excel', 'xlrd'), ('html', None)]
         else:
+            # Unknown or missing extension — try every strategy
             attempts = [('excel', 'openpyxl'), ('excel', 'xlrd'), ('html', None), ('csv', None)]
 
         last_err = None
@@ -1222,9 +1599,22 @@ class TrialBalanceParser:
             except Exception as e:  # try the next strategy
                 last_err = e
                 continue
-        raise FileParseError(f"Failed to read file (all parsers tried): {last_err}")
+        logger.warning("All read strategies failed for '%s': %s — returning empty DataFrame",
+                       file_path, last_err)
+        return pd.DataFrame()
 
     def _parse_dataframe(self, df: pd.DataFrame, source: str = '') -> List[TrialBalanceEntry]:
+        # Strategy I: Tally single-column indented TB (3-col: Name | Debit | Credit)
+        # Check FIRST because these files have "Particulars" header but NO separate
+        # Dr/Cr column header for the credit side (only "Debit" is labeled), which
+        # causes Format A to miss them.
+        if _is_tally_single_col_tb(df):
+            entries = _parse_tally_single_col_tb(df, source)
+            if entries:
+                logger.info("Parsed %d TB entries (Format I / Tally single-col) from %s",
+                            len(entries), source)
+                return entries
+
         # Strategy A: Standard Dr/Cr header
         header_row, col_map = _detect_columns(df)
         if header_row >= 0:
@@ -1250,13 +1640,13 @@ class TrialBalanceParser:
                 logger.info("Parsed %d TB entries (BS/PL) from %s", len(entries), source)
                 return entries
 
-        raise FileParseError(
-            "Could not detect column headers (Debit/Credit). "
-            "Supported formats:\n"
-            "  • Standard TB: 'Amount (Dr)'/'Amount (Cr)' or 'Debit'/'Credit'\n"
-            "  • Balance Sheet/P&L (Liabilities/Assets headers)\n"
-            "  • Balance Sheet/P&L (PARTICULARS/AMOUNT two-column layout)"
+        logger.warning(
+            "Could not detect column layout in '%s'. "
+            "Tried: Format I (Tally single-col TB), Standard Dr/Cr, "
+            "Two-column PARTICULARS/AMOUNT, Balance Sheet Liabilities/Assets. "
+            "Returning empty — file will be skipped with a warning.", source
         )
+        return []
 
     def _extract_standard(
         self, df: pd.DataFrame, header_row: int, col_map: Dict[str, int]
@@ -1313,6 +1703,20 @@ class TrialBalanceParser:
 
     def _parse_pdf(self, file_path: str) -> List[TrialBalanceEntry]:
         import pdfplumber
+
+        # ── Try Format I (PDF): Tally single-column Trial Balance ────────────────
+        # Detects by finding "Debit" and "Credit" column headers on the same row.
+        # Same logic as the XLS Format I but using word x-positions to split Dr/Cr.
+        # Must run FIRST because this format has "Particulars" in the text which
+        # would otherwise trigger Format H or table-extraction paths incorrectly.
+        try:
+            i_entries = _parse_tally_single_col_pdf(file_path)
+            if i_entries:
+                logger.info("Parsed %d entries via Tally single-col TB PDF (Format I-PDF)",
+                            len(i_entries))
+                return i_entries
+        except Exception as _ie:
+            logger.warning("Format I-PDF parse failed: %s", _ie)
 
         # ── Try Format H: PARTICULARS/AMOUNT two-sided (indentation-based) ──────
         # Runs FIRST: when a PARTICULARS/AMOUNT header exists, the indentation
