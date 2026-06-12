@@ -1413,47 +1413,72 @@ def _parse_tally_single_col_tb(df: pd.DataFrame, source: str = '') -> List[Trial
 # on left AND right side header row.
 
 _J_SKIP_KW = {
-    'total', 'grand total', 'page', 'from', 'to', 'account', 'amount',
-    'liability', 'asset', 'liabilities', 'assets', 'carried', 'over',
-    'brought', 'forward', 'balance sheet', 'profit and loss', 'profit & loss',
+    'total', 'grand total', 'page', 'from', 'to', 'amount',
+    'carried', 'over', 'brought', 'forward',
+    'balance sheet', 'profit and loss', 'profit & loss',
+    'end of report', 'reporting',
+}
+# Exact-match noise names (used with 'nl in _J_NOISE_NAMES' not substring)
+_J_NOISE_NAMES = {
+    'as per enclosed list', 'end of report', 'page 1 of 1', 'page 1 of',
+    'nett profit', 'gross profit', 'gross profit b/d', 'net profit',
+    'profit and loss aic', 'profit and loss a/c',
+    'b/d', 'income', 'indirect', 'total :', 'total',
+    'liability', 'liabilities', 'asset', 'assets',
+    'account', 'account name', 'amount',
+    'as per enclosed', 'enclosed list',
 }
 _J_SECTION_KW = {
     # BS Left (Credit / Liability)
-    'capital account': 'CAPITAL',
-    'partners capital': 'CAPITAL',
-    'current liabilities': 'PROVISIONS',
-    'duties and taxes': 'DUTIES AND TAXES',
-    'brokers (sale commission agents)': 'SUNDRY CREDITORS',
-    'provision': 'PROVISIONS',
-    'sundry creditors': 'SUNDRY CREDITORS',
-    'sundry creditors mill': 'SUNDRY CREDITORS',
-    'sundry payables': 'SUNDRY CREDITORS',
-    'loans liabilities': 'UNSECURED LOANS',
-    'loans & borrowings': 'UNSECURED LOANS',
+    'capital a/c':                     'CAPITAL',
+    'capital account':                 'CAPITAL',
+    'partners capital':                'CAPITAL',
+    'current liabilities':             'PROVISIONS',
+    'current liabities':               'PROVISIONS',
+    'duties and taxes':                'DUTIES AND TAXES',
+    'brokers (sale commission agents)':'SUNDRY CREDITORS',
+    'provision':                       'PROVISIONS',
+    'sundry creditors':                'SUNDRY CREDITORS',
+    'sundry creditors mill':           'SUNDRY CREDITORS',
+    'sundry payables':                 'SUNDRY CREDITORS',
+    'loans liabilities':               'UNSECURED LOANS',
+    'loans & borrowings':              'UNSECURED LOANS',
+    'unsecured loans':                 'UNSECURED LOANS',
     # BS Right (Debit / Asset)
-    'current assets': 'OTHER CURRENT ASSETS',
-    'cash & bank balances': 'CASH AND BANK',
-    'cash and bank balances': 'CASH AND BANK',
-    'loans / advances a/c': 'LOANS AND ADVANCES (ASSETS)',
-    'loans and advances': 'LOANS AND ADVANCES (ASSETS)',
-    'sundry debtors': 'SUNDRY DEBTORS',
-    'sundry receivables': 'SUNDRY DEBTORS',
-    'fixed assets': 'FIXED ASSETS',
-    'other current assets': 'OTHER CURRENT ASSETS',
-    'stock in hand': 'CLOSING STOCK',
-    'investments': 'INVESTMENTS',
+    'current assets':                  'OTHER CURRENT ASSETS',
+    'current assests':                 'OTHER CURRENT ASSETS',
+    'cash & bank balances':            'CASH AND BANK',
+    'cash and bank balances':          'CASH AND BANK',
+    'bank a/c':                        'CASH AND BANK',
+    'loans / advances a/c':            'LOANS AND ADVANCES (ASSETS)',
+    'loans and advances':              'LOANS AND ADVANCES (ASSETS)',
+    'loans and advances a/c':          'LOANS AND ADVANCES (ASSETS)',
+    'sundry debtors':                  'SUNDRY DEBTORS',
+    'sundry receivables':              'SUNDRY DEBTORS',
+    'fixed assets':                    'FIXED ASSETS',
+    'deposits and investments':        'INVESTMENTS',
+    'other current assets':            'OTHER CURRENT ASSETS',
+    'stock in hand':                   'CLOSING STOCK',
+    'closing stock':                   'CLOSING STOCK',
+    'investments':                     'INVESTMENTS',
+    'deposits':                        'DEPOSITS',
+    'cash in hand':                    'CASH IN HAND',
     # P&L Left (Debit / Expenses)
-    'opening stock': 'OPENING STOCK',
-    'expenses direct': 'DIRECT EXPENSES (M)',
-    'expenses direct (t&m)': 'DIRECT EXPENSES (M)',
-    'purchase': 'PURCHASE A/C',
-    'expenses indirect': 'INDIRECT EXPENSES',
-    'expenses indirect (p&l)': 'INDIRECT EXPENSES',
+    'opening stock':                   'OPENING STOCK',
+    'purchase':                        'PURCHASE A/C',
+    'direct expenses':                 'DIRECT EXPENSES (M)',
+    'indirect expenses':               'INDIRECT EXPENSES',
+    'indirect expences':               'INDIRECT EXPENSES',
+    'expenses direct':                 'DIRECT EXPENSES (M)',
+    'expenses direct (t&m)':           'DIRECT EXPENSES (M)',
+    'expenses indirect':               'INDIRECT EXPENSES',
+    'expenses indirect (p&l)':         'INDIRECT EXPENSES',
     # P&L Right (Credit / Income)
-    'sales': 'SALES A/C',
-    'closing stock': 'CLOSING STOCK',
-    'gross profit': 'CAPITAL',
-    'other income': 'INDIRECT INCOMES',
+    'sales':                           'SALES A/C',
+    'gross profit':                    'CAPITAL',
+    'indirect income':                 'INDIRECT INCOMES',
+    'indirect incomes':                'INDIRECT INCOMES',
+    'other income':                    'INDIRECT INCOMES',
 }
 
 
@@ -1492,21 +1517,44 @@ def _detect_two_sided_section_pdf(file_path: str):
             if 'debit' in text_lower and 'credit' in text_lower:
                 return None
 
-            # Find page split x by locating the right-side section header
+            # Find page split x — the boundary between left amount column and
+            # right name column. Strategy: find the gap between the leftmost
+            # right-side text word (section header like ASSETS, SALES) and the
+            # rightmost left-side amount word.
             page_w = float(p0.width)
 
-            # Find "Asset" or second "Account" word x position
-            right_headers = [w for w in words
-                             if w['text'].lower() in ('asset', 'assets', 'income')
-                             and float(w['x0']) > page_w * 0.35]
-            split_x = float(right_headers[0]['x0']) - 10 if right_headers else page_w * 0.48
-
-            # Amount columns: find rightmost numeric word on a data row
+            # All numeric words (amounts)
             amt_words = [w for w in words
-                         if re.match(r'^-?[\d,]+\.\d+$', w['text'].replace(',', '')
-                                     .lstrip('-').lstrip('(').rstrip(')'))]
-            left_amts  = sorted([float(w['x0']) for w in amt_words if float(w['x0']) < split_x], reverse=True)
-            right_amts = sorted([float(w['x0']) for w in amt_words if float(w['x0']) >= split_x])
+                         if re.match(r'^-?[\d,]+\.?\d*$',
+                                     w['text'].replace(',','').lstrip('-').lstrip('(').rstrip(')'))]
+
+            # Find the right-side section header x position
+            # Right-side headers appear in the right half of the page
+            right_hdr_words = [w for w in words
+                                if w['text'].lower() in (
+                                    'assets', 'asset', 'sales', 'income', 'liabilities',
+                                    'liability', 'account')
+                                and float(w['x0']) > page_w * 0.40]
+            if right_hdr_words:
+                right_name_x = min(float(w['x0']) for w in right_hdr_words)
+            else:
+                right_name_x = page_w * 0.52
+
+            # Find left-side amount column x (the rightmost amount on the left half)
+            left_half_amts = [float(w['x0']) for w in amt_words
+                              if float(w['x0']) < right_name_x]
+            if left_half_amts:
+                left_amt_col_x = max(left_half_amts)
+            else:
+                left_amt_col_x = right_name_x * 0.80
+
+            # Split is midway between left amount col and right name col
+            split_x = (left_amt_col_x + right_name_x) / 2.0
+
+            left_amts  = sorted([float(w['x0']) for w in amt_words
+                                  if float(w['x0']) < split_x], reverse=True)
+            right_amts = sorted([float(w['x0']) for w in amt_words
+                                  if float(w['x0']) >= split_x])
             left_amt_x  = left_amts[0]  if left_amts  else split_x * 0.85
             right_amt_x = right_amts[-1] if right_amts else page_w * 0.90
 
@@ -1563,7 +1611,7 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
         if not name or abs(amt) < 0.01:
             return
         nl = name.lower().strip()
-        if any(sk in nl for sk in _J_SKIP_KW):
+        if nl in _J_NOISE_NAMES:
             return
         if _is_total_row(name):
             return
@@ -1591,14 +1639,19 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
         # Fallback: use raw name uppercased
         return raw_name.strip().upper()
 
+    # First data row threshold — skip company header rows (first ~60pt of page)
+    # These contain company name, title, date etc., not financial data.
+    # The actual column headers (LIABILITIES/ASSETS or Account Name/Amount) appear
+    # at y≈54, so data rows start at y≈70+.
+    HEADER_AREA_TOP = 60.0  # rows at or above this y are pure header noise
+
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
             words = page.extract_words(keep_blank_chars=False)
             if not words:
                 continue
 
-            # Cluster into rows with tighter tolerance (2pt) to avoid merging
-            # adjacent left/right rows that have slightly different y-positions
+            # Cluster into rows with 2pt tolerance
             words.sort(key=lambda w: (round(float(w['top']) / 2) * 2, float(w['x0'])))
             rows: Dict[int, list] = {}
             for w in words:
@@ -1606,6 +1659,10 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                 rows.setdefault(y, []).append(w)
 
             for y in sorted(rows.keys()):
+                # Skip page header area (company name, title, date rows)
+                if y < HEADER_AREA_TOP:
+                    continue
+
                 rw = sorted(rows[y], key=lambda w: float(w['x0']))
                 left_w  = [w for w in rw if float(w['x0']) < split_x]
                 right_w = [w for w in rw if float(w['x0']) >= split_x]
@@ -1624,25 +1681,60 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                     name_str = _clean(' '.join(name_tokens)).strip()
                     nl = name_str.lower()
 
-                    # Skip header/footer rows
-                    skip_prefixes = ('account name', 'account amount', 'liability',
-                                     'asset', 'amount', 'jai kanhaiya', '5/421',
-                                     'ichalkaranji', '0230-', 'from :', 'from:',
-                                     'balance sheet', 'profit and loss', 'profit & loss',
-                                     'opening stock 47', 'expenses direct', 'purchase 21',
-                                     'gross profit 22', 'grand total', 'expenses indirect',
-                                     'net profit 1', 'sundry creditors write')
+                    # Skip header/footer/noise rows
+                    skip_prefixes = (
+                        'account name', 'account amount',
+                        'amount', 'balance sheet', 'profit and loss', 'profit & loss',
+                        'trading profit', 'grand total', 'end of report',
+                        'reporting date', 'page 1 of', 'page no',
+                        'liabilities amount', 'assets amount',  # column header rows
+                    )
                     if any(nl.startswith(sk) for sk in skip_prefixes):
+                        continue
+                    # Skip standalone header words (exact match only)
+                    if nl in ('liabilities', 'liability', 'assets', 'asset',
+                              'account', 'amount', 'account name amount'):
                         continue
                     if not name_str:
                         continue
 
                     cur_grp = left_group if side_name == 'L' else right_group
 
+                    if not name_str:
+                        # Amount-only row — no name text at all on this side
+                        if amt_tokens:
+                            # Attach to pending name if there is one
+                            pend = left_pending_name if side_name == 'L' else right_pending_name
+                            if pend:
+                                if side_name == 'L':
+                                    best = min(amt_tokens, key=lambda w: abs(float(w['x0']) - left_amt_x))
+                                else:
+                                    best = min(amt_tokens, key=lambda w: abs(float(w['x0']) - right_amt_x))
+                                amt = _parse_num(best['text'])
+                                _emit(pend, cur_grp, amt, is_dr)
+                                if side_name == 'L':
+                                    left_pending_name = ''
+                                else:
+                                    right_pending_name = ''
+                        continue
+
+                    # We have a name — check if it's a section header or a leaf entry
+                    # If the name is a known section keyword, always update the group.
+                    is_section_name = (nl in _J_SECTION_KW or
+                                       any(nl.startswith(kw) for kw in _J_SECTION_KW))
+
                     if not amt_tokens:
-                        # No amount on this row — section header or pending name
-                        if not any(sk in nl for sk in _J_SKIP_KW) \
-                                and not _is_total_row(name_str):
+                        # No amount → section header
+                        _is_noise_hdr = (
+                            _is_total_row(name_str)
+                            or _is_profit_row(name_str)
+                            or nl in _J_NOISE_NAMES
+                            or 'as per enclosed' in nl
+                            or 'enclosed list' in nl
+                            or re.match(r'^\d{1,2}/\d{2}/\d{4}', name_str)
+                            or any(kw == nl for kw in _J_SKIP_KW)
+                        )
+                        if not _is_noise_hdr:
                             canonical = _resolve_section(name_str, side_name)
                             if side_name == 'L':
                                 left_group = canonical
@@ -1658,24 +1750,34 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                             best = min(amt_tokens, key=lambda w: abs(float(w['x0']) - right_amt_x))
                         amt = _parse_num(best['text'])
 
-                        if name_str and not any(sk in nl for sk in _J_SKIP_KW) \
-                                and not _is_total_row(name_str) \
-                                and not re.match(r'^page\s+\d', nl):
+                        _is_noise_entry = (
+                            _is_total_row(name_str)
+                            or _is_profit_row(name_str)
+                            or re.match(r'^page\s+\d', nl)
+                            or nl in _J_NOISE_NAMES
+                            or nl in ('b/d', 'income', 'indirect', 'claim', 'a/c',
+                                      'and', 'or', '&', 'on sale', 'on purchase',
+                                      'total', 'total :', 'grand total')
+                            or 'as per enclosed' in nl
+                            or 'enclosed list' in nl
+                            or re.match(r'^\d{1,2}/\d{2}/\d{4}', name_str)
+                            or any(kw == nl for kw in _J_SKIP_KW)
+                        )
+
+                        if name_str and not _is_noise_entry:
+                            # If section keyword with amount: update group then emit
+                            if is_section_name:
+                                canonical = _resolve_section(name_str, side_name)
+                                if side_name == 'L':
+                                    left_group = canonical
+                                else:
+                                    right_group = canonical
+                            cur_grp = left_group if side_name == 'L' else right_group
                             _emit(name_str, cur_grp, amt, is_dr)
                             if side_name == 'L':
                                 left_pending_name = ''
                             else:
                                 right_pending_name = ''
-                        else:
-                            # Amount-only row — attach to pending name
-                            pend = left_pending_name if side_name == 'L' else right_pending_name
-                            grp  = left_group if side_name == 'L' else right_group
-                            if pend:
-                                _emit(pend, grp, amt, is_dr)
-                                if side_name == 'L':
-                                    left_pending_name = ''
-                                else:
-                                    right_pending_name = ''
 
     logger.info("Format J (two-sided section PDF) parsed %d entries from %s",
                 len(entries), file_path)

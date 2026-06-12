@@ -153,6 +153,30 @@ _ALIASES: Dict[str, str] = {
 
     # Deposits
     'deposits':                        'DEPOSITS',
+    'deposits and investments':        'INVESTMENTS',
+    'current assests':                 'OTHER CURRENT ASSETS',   # common typo
+    'current liabities':               'PROVISIONS',             # common typo
+    # Sub-stock items (children of Opening/Closing Stock)
+    'cloth stock':                     'CLOSING STOCK',
+    'yarn stock':                      'CLOSING STOCK',
+    # Specific expense/income account names
+    'discount & claim':                'INDIRECT INCOMES',
+    'second & shortage':               'DIRECT EXPENSES (M)',
+    'sizing and warping a/c':          'DIRECT EXPENSES (M)',
+    'printin & stanary':               'INDIRECT EXPENSES',
+    'computer software maint.':        'INDIRECT EXPENSES',
+    'foiding expenses':                'INDIRECT EXPENSES',
+    'hero hond expenses':              'INDIRECT EXPENSES',
+    'scooter expenses':                'INDIRECT EXPENSES',
+    'scooty expenses':                 'INDIRECT EXPENSES',
+    'teliphone expenses':              'INDIRECT EXPENSES',
+    'tds on brokrage':                 'PROVISIONS',
+    'tds on interest':                 'PROVISIONS',
+    'wages tds account':               'PROVISIONS',
+    'rcm cgst tax a/c':                'PROVISIONS',
+    'rcm sgst tax a/c':                'PROVISIONS',
+    'reverse charge mechanism':        'PROVISIONS',
+    'interest a/c':                    'INDIRECT INCOMES',
 
     # Loans & Advances (Assets)
     'loans & advances':                'LOANS AND ADVANCES (ASSETS)',
