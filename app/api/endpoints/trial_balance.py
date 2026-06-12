@@ -55,15 +55,16 @@ async def trial_balance_process(
             fname   = up.filename or 'upload.xlsx'
             try:
                 validate_file_size(len(content), max_mb=settings.MAX_FILE_SIZE_MB)
-                file_type = detect_file_type(fname, content)
-            except UnsupportedFileTypeError as exc:
-                raise HTTPException(status_code=415, detail=str(exc))
+            except UnsupportedFileTypeError as size_exc:
+                logger.warning("File too large, skipping %s: %s", fname, size_exc)
+                continue   # skip this file, process remaining ones
 
-            if file_type not in ('excel', 'csv', 'pdf', 'xml', 'docx'):
-                raise HTTPException(
-                    status_code=415,
-                    detail=f"Trial Balance requires XLSX/XLS/CSV/PDF — '{fname}' is not supported."
-                )
+            # Detect type for logging only — we accept ALL formats
+            try:
+                file_type = detect_file_type(fname, content)
+            except Exception:
+                file_type = 'unknown'
+            logger.info("Received file '%s' detected as '%s'", fname, file_type)
 
             ext  = fname.rsplit('.', 1)[-1].lower()
             safe = os.path.basename(fname).replace('\\\\', '_')
@@ -96,11 +97,20 @@ async def trial_balance_process(
         )
 
     except EmptyFileError as exc:
-        raise HTTPException(status_code=422, detail={"error": "empty_file",      "message": str(exc)})
+        raise HTTPException(status_code=422, detail={
+            "error": "no_data",
+            "message": str(exc) + " — Please check that the file contains TB/BS/P&L data with Debit/Credit columns."
+        })
     except FileParseError as exc:
-        raise HTTPException(status_code=422, detail={"error": "parse_error",     "message": str(exc)})
+        raise HTTPException(status_code=422, detail={
+            "error": "parse_error",
+            "message": str(exc)
+        })
     except FinanceBackendError as exc:
-        raise HTTPException(status_code=422, detail={"error": "processing_error","message": str(exc)})
+        raise HTTPException(status_code=422, detail={
+            "error": "processing_error",
+            "message": str(exc)
+        })
     except HTTPException:
         raise
     except Exception as exc:

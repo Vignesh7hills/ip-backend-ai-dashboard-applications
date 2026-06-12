@@ -47,6 +47,11 @@ _ALIASES: Dict[str, str] = {
     'capital account':                 'CAPITAL',
     'capital':                         'CAPITAL',
     'net profit':                      'CAPITAL',
+    'net loss':                        'CAPITAL',
+    'profit & loss a/c':               'CAPITAL',
+    'profit and loss a/c':             'CAPITAL',
+    'profit & loss account':           'CAPITAL',
+    'p & l a/c':                       'CAPITAL',
     'shree ganesh ji maharaj':         'CAPITAL',
     # FIX: SHRI GANESHJI MAHARAJ (common Tally entry for proprietor share in profit)
     'shri ganeshji maharaj':           'CAPITAL',
@@ -92,6 +97,19 @@ _ALIASES: Dict[str, str] = {
     'duties and taxes':                'PROVISIONS',
     # FIX: CURRENT LIABILITIES group in BS format maps to PROVISIONS (liability side)
     'current liabilities':             'PROVISIONS',
+    'loans (liability)':               'UNSECURED LOANS',
+    'loans(liability)':                'UNSECURED LOANS',
+    'loans & borrowings':              'UNSECURED LOANS',
+    'bank accounts':                   'CASH AND BANK',
+    'bank account':                    'CASH AND BANK',
+    'cash-in-hand':                    'CASH IN HAND',
+    'sales accounts':                  'SALES A/C',
+    'sales account':                   'SALES A/C',
+    'purchase accounts':               'PURCHASE A/C',
+    'purchase account':                'PURCHASE A/C',
+    'direct expenses':                 'DIRECT EXPENSES (M)',
+    'indirect incomes':                'INDIRECT INCOMES',
+    'indirect expenses':               'INDIRECT EXPENSES',
 
     # Fixed Assets
     'fixed assets':                    'FIXED ASSETS',
