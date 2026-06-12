@@ -2,12 +2,33 @@
 Trial Balance Calculator with intelligent group normalisation.
 Maps raw parsed group names → canonical Genius Software group names.
 """
+import os
+import json
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from app.modules.trial_balance.parser import TrialBalanceEntry
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Master reference grouping dictionary ──────────────────────────────────────
+# Built from the client's "Master Reference For Grouping" workbook: an
+# authoritative Ledger Name → Group map plus the canonical Group vocabulary.
+# Context-dependent names (Cloth/Yarn/Discount, which vary by Trading section)
+# are deliberately excluded and resolved from the source section header instead.
+_MASTER_LEDGER_MAP: Dict[str, str] = {}
+_MASTER_GROUPS: set = set()
+try:
+    _mpath = os.path.join(os.path.dirname(__file__), 'grouping_master.json')
+    with open(_mpath, 'r', encoding='utf-8') as _fh:
+        _mdata = json.load(_fh)
+    _MASTER_LEDGER_MAP = {k.strip().lower(): v.strip().upper()
+                          for k, v in _mdata.get('ledger_to_group', {}).items()}
+    _MASTER_GROUPS = {g.strip().upper() for g in _mdata.get('groups', [])}
+    logger.info("Loaded %d master ledger mappings, %d canonical groups",
+                len(_MASTER_LEDGER_MAP), len(_MASTER_GROUPS))
+except Exception as _e:  # pragma: no cover
+    logger.warning("Master grouping reference not loaded: %s", _e)
 
 
 @dataclass
@@ -277,6 +298,27 @@ _KEYWORD_MAP = [
      'SALES A/C'),
     (['ganesh', 'ganeshji'],
      'CAPITAL'),
+    # Common P&L expense patterns (last-resort, after exact aliases/master map).
+    (['repair', 'maintenance', 'maintainance'],
+     'REPAIR & MAINTENANCE'),
+    (['interest'],
+     'INTEREST PAID'),
+    (['godown rent', 'office rent', 'rent &', 'rent and', 'rent a/c'],
+     'RENT'),
+    (['wages'],
+     'DIRECT WAGES'),
+    (['commission'],
+     'COMMISSION PAID'),
+    (['profession tax', 'professional tax'],
+     'RATES AND TAXES'),
+    (['donation'],
+     'DONATION'),
+    (['insurance'],
+     'INSURANCE'),
+    (['depreciation'],
+     'DEPRECIATION'),
+    (['freight', 'cartage', 'hamali', 'vahatook', 'vahatuk', 'transport'],
+     'FREIGHT'),
 ]
 
 
@@ -303,6 +345,9 @@ def _match(text: str) -> Optional[str]:
     # 1) Exact alias wins.
     if key in _ALIASES:
         return _ALIASES[key]
+    # 1b) Master reference ledger→group map (client's authoritative dictionary).
+    if key in _MASTER_LEDGER_MAP:
+        return _MASTER_LEDGER_MAP[key]
     # 2) Balance-sheet PARTY/LIABILITY indicator outranks the expense guard:
     #    "Sundry Creditors for Expenses" (often PDF-truncated to "...EXPENS")
     #    is a liability, never a P&L expense, despite containing "exp".
@@ -323,6 +368,12 @@ def _match(text: str) -> Optional[str]:
     for keywords, target in _KEYWORD_MAP:
         if any(kw in key for kw in keywords):
             return target
+    # 5) Retry once without a trailing "A/c" / "Account" suffix so ledgers like
+    #    "Brokerage A/c" or "Depreciation A/c." still classify.
+    import re
+    stripped = re.sub(r'\s*(a/c\.?|account)\s*$', '', key).strip()
+    if stripped and stripped != key:
+        return _match(stripped)
     return None
 
 

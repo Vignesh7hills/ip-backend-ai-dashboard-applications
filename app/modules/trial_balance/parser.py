@@ -397,112 +397,177 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
 # ── Format C: PARTICULARS/AMOUNT two-column XLS ───────────────────────────────
 
 def _is_particulars_two_column(df: pd.DataFrame) -> bool:
-    for row_idx in range(min(15, len(df))):
-        row = [str(c).lower().strip() for c in df.iloc[row_idx]]
-        non_nan = [c for c in row if c and c != 'nan']
-        if not non_nan:
-            continue
-        p_count = sum(1 for c in non_nan if 'particulars' in c)
-        a_count = sum(1 for c in non_nan if 'amount' in c)
-        if p_count >= 2 and a_count >= 2:
-            return True
-        if p_count >= 1 and a_count >= 2:
-            return True
-    return False
+    row_idx, ok = _find_particulars_anchors(df)
+    return ok and row_idx >= 0
+
+
+_NAME_HEADERS = ('particular', 'account name', 'account head', 'ledger',
+                 'name of account', 'account')
 
 
 def _find_particulars_header_row(df: pd.DataFrame) -> int:
-    for row_idx in range(min(15, len(df))):
-        row = [str(c).lower().strip() for c in df.iloc[row_idx]]
-        non_nan = [c for c in row if c and c != 'nan']
-        if not non_nan:
-            continue
-        p_count = sum(1 for c in non_nan if 'particulars' in c)
-        a_count = sum(1 for c in non_nan if 'amount' in c)
-        if (p_count >= 2 and a_count >= 2) or (p_count >= 1 and a_count >= 2):
-            return row_idx
-    return -1
+    row_idx, _ = _find_particulars_anchors(df)
+    return row_idx
 
 
-def _parse_particulars_two_column(df: pd.DataFrame) -> List[TrialBalanceEntry]:
-    hdr_row = _find_particulars_header_row(df)
-    if hdr_row < 0:
+def _find_particulars_anchors(df: pd.DataFrame):
+    """Locate a two-sided (Liabilities|Amount || Assets|Amount) header row.
+
+    Matches PARTICULARS / Account Name / Ledger style headers with two or more
+    Amount columns. Returns (row_idx, True) or (-1, False).
+    """
+    for row_idx in range(min(20, len(df))):
+        cells = [str(c).lower().strip() for c in df.iloc[row_idx]]
+        n_name = sum(1 for c in cells if any(h in c for h in _NAME_HEADERS))
+        n_amt  = sum(1 for c in cells if 'amount' in c)
+        if (n_name >= 1 and n_amt >= 2) or (n_name >= 2 and n_amt >= 1):
+            return row_idx, True
+    return -1, False
+
+
+def _filename_is_pl(source: str):
+    """Filename hint: P&L vs Balance Sheet. Returns True (P&L), False (BS) or None.
+
+    Per the client rule: a P&L file means Left=Dr / Right=Cr; a Balance Sheet
+    means Left=Cr / Right=Dr. Filenames carry 'pl'/'p&l'/'profit'/'trading' or
+    'bs'/'bl'/'balance'.
+    """
+    s = (source or '').lower()
+    pl_keys = ('p & l', 'p&l', 'profit', 'pandl', 'p and l', '-pl', '_pl',
+               ' pl', 'pl.', 'p.l', 'p_l', 'trading')
+    bs_keys = ('balance', '-bs', '_bs', ' bs', 'bs.', 'b.s', 'b_s',
+               '-bl', '_bl', 'b/s')
+    if any(k in s for k in pl_keys):
+        return True
+    if any(k in s for k in bs_keys):
+        return False
+    return None
+
+
+def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[TrialBalanceEntry]:
+    hdr_row, ok = _find_particulars_anchors(df)
+    if not ok or hdr_row < 0:
         return []
 
-    is_pl = _is_pl_document(df, hdr_row)
+    # Filename hint (client rule) takes precedence over content heuristics.
+    is_pl = is_pl_hint if is_pl_hint is not None else _is_pl_document(df, hdr_row)
+    ncols = df.shape[1]
 
-    def sv(row_vals, col):
-        if 0 <= col < len(row_vals):
-            v = str(row_vals[col]).strip()
-            return '' if v == 'nan' else v
-        return ''
-
-    # Auto-detect leaf vs group columns
-    col3_hits = col4_hits = 0
-    for ri in range(hdr_row + 1, min(hdr_row + 20, len(df))):
+    # ── Infer column roles EMPIRICALLY from the body (header label positions
+    #    are unreliable — some templates compress headers while data spreads
+    #    across other columns). Classify each column as Text or Numeric. ──────
+    text_ct = [0] * ncols
+    num_ct  = [0] * ncols
+    for ri in range(hdr_row + 1, len(df)):
         row = list(df.iloc[ri])
-        if sv(row, 1) and sv(row, 1) not in ('nan', ''):
-            if parse_amount(sv(row, 3)) != 0.0: col3_hits += 1
-            if parse_amount(sv(row, 4)) != 0.0: col4_hits += 1
-    left_leaf_col  = 3 if col3_hits >= col4_hits else 4
-    left_grp_col   = 4 if col3_hits >= col4_hits else 3
+        for c in range(min(ncols, len(row))):
+            v = str(row[c]).strip()
+            if not v or v.lower() == 'nan':
+                continue
+            if _is_numeric(row[c]) and parse_amount(v) != 0.0:
+                num_ct[c] += 1
+            elif not _is_numeric(row[c]) and len(v) >= 2:
+                text_ct[c] += 1
 
-    col8_hits = col9_hits = 0
-    for ri in range(hdr_row + 1, min(hdr_row + 20, len(df))):
-        row = list(df.iloc[ri])
-        if sv(row, 6) and sv(row, 6) not in ('nan', ''):
-            if parse_amount(sv(row, 8)) != 0.0: col8_hits += 1
-            if parse_amount(sv(row, 9)) != 0.0: col9_hits += 1
-    right_leaf_col = 8 if col8_hits >= col9_hits else 9
-    right_grp_col  = 9 if col8_hits >= col9_hits else 8
+    # Cluster consecutive same-role columns (small gaps tolerated).
+    clusters = []  # list of (role, [cols])
+    for c in range(ncols):
+        if num_ct[c] == 0 and text_ct[c] == 0:
+            continue
+        role = 'N' if num_ct[c] >= text_ct[c] else 'T'
+        if clusters and clusters[-1][0] == role and c - clusters[-1][1][-1] <= 2:
+            clusters[-1][1].append(c)
+        else:
+            clusters.append((role, [c]))
+
+    name_clusters = [cols for role, cols in clusters if role == 'T']
+    amt_clusters  = [cols for role, cols in clusters if role == 'N']
+    if not name_clusters or not amt_clusters:
+        return []
+
+    sides = []  # (name_cols, amt_cols, positive_to_debit, indented)
+    def _indented(name_cols):
+        # Names occupy more than one column in the body → group is the outer
+        # column, leaves are indented. Otherwise names are 'flat' (single
+        # column) and header-vs-leaf is decided by amount presence.
+        return sum(1 for c in name_cols if text_ct[c] > 0) > 1
+    # Left side: liabilities/capital → Credit on a BS, expenses → Debit on a P&L
+    sides.append((name_clusters[0], amt_clusters[0], is_pl, _indented(name_clusters[0])))
+    # Right side (assets → Debit on a BS, income → Credit on a P&L)
+    if len(name_clusters) >= 2 and len(amt_clusters) >= 2:
+        sides.append((name_clusters[1], amt_clusters[1], not is_pl, _indented(name_clusters[1])))
 
     entries: List[TrialBalanceEntry] = []
-    left_group = right_group = ''
+    # Track group header totals so a group with detail rows does not also emit
+    # its header total (which would double count).
+    group_total = {}    # group name -> (amount, positive_to_debit)
+    group_leaves = {}   # group name -> count of detail entries
 
+    def _emit(name, group, amt, positive_to_debit):
+        e = TrialBalanceEntry(account_name=name, group=group)
+        if positive_to_debit:
+            e.debit, e.credit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
+        else:
+            e.credit, e.debit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
+        entries.append(e)
+
+    def _rightmost_amt(row, cols):
+        val = 0.0
+        for c in cols:
+            if 0 <= c < len(row):
+                a = parse_amount(str(row[c]).strip())
+                if a != 0.0:
+                    val = a
+        return val
+
+    cur_group = ['' for _ in sides]
     for row_idx in range(hdr_row + 1, len(df)):
-        row_raw = list(df.iloc[row_idx])
+        row = list(df.iloc[row_idx])
+        for si, (name_cols, amt_cols, ptd, indented) in enumerate(sides):
+            present = []
+            for c in name_cols:
+                if 0 <= c < len(row):
+                    v = _clean(str(row[c]).strip())
+                    if v and v.lower() != 'nan' and not _is_numeric(row[c]):
+                        present.append((c, v))
+            amt = _rightmost_amt(row, amt_cols)
+            if not present:
+                continue
 
-        l0 = _clean(sv(row_raw, 0))
-        l1 = _clean(sv(row_raw, 1))
-        l_leaf = parse_amount(sv(row_raw, left_leaf_col))
-        l_grp  = parse_amount(sv(row_raw, left_grp_col))
-
-        if l0 and not _is_skip(l0):
-            if l_grp != 0.0 and l_leaf == 0.0:
-                left_group = l0
-            elif l_leaf != 0.0:
-                left_group = l0
-
-        if l1 and not _is_skip(l1) and l_leaf != 0.0:
-            e = TrialBalanceEntry(account_name=l1, group=left_group)
-            if is_pl:
-                e.debit  = abs(l_leaf) if l_leaf >= 0 else 0.0
-                e.credit = abs(l_leaf) if l_leaf <  0 else 0.0
+            if indented:
+                # Group header in the OUTERMOST name column; sub-ledgers indented.
+                outer = min(name_cols)
+                group_txt = next((t for c, t in present if c == outer), None)
+                leaf_txt  = next((t for c, t in present if c > outer), None)
+                if leaf_txt and not _is_skip(leaf_txt):
+                    if group_txt and not _is_skip(group_txt):
+                        cur_group[si] = group_txt
+                    g = cur_group[si] or group_txt or leaf_txt
+                    if amt != 0.0:
+                        _emit(leaf_txt, g, amt, ptd)
+                        group_leaves[g] = group_leaves.get(g, 0) + 1
+                elif group_txt and not _is_skip(group_txt):
+                    cur_group[si] = group_txt
+                    if amt != 0.0:
+                        group_total[group_txt] = (amt, ptd)
             else:
-                e.credit = l_leaf if l_leaf >= 0 else 0.0
-                e.debit  = abs(l_leaf) if l_leaf < 0 else 0.0
-            entries.append(e)
+                # FLAT layout (names share one column): a row with a name but NO
+                # amount is a group header; a name WITH an amount is a leaf under
+                # the most recent header.
+                name = present[0][1]
+                if _is_skip(name):
+                    continue
+                if amt == 0.0:
+                    cur_group[si] = name           # group header line
+                else:
+                    g = cur_group[si] or name
+                    _emit(name, g, amt, ptd)
+                    group_leaves[g] = group_leaves.get(g, 0) + 1
 
-        r5 = _clean(sv(row_raw, 5))
-        r6 = _clean(sv(row_raw, 6))
-        r_leaf = parse_amount(sv(row_raw, right_leaf_col))
-        r_grp  = parse_amount(sv(row_raw, right_grp_col))
-
-        if r5 and not _is_skip(r5):
-            if r_grp != 0.0 and r_leaf == 0.0:
-                right_group = r5
-            elif r_leaf != 0.0:
-                right_group = r5
-
-        if r6 and not _is_skip(r6) and r_leaf != 0.0:
-            e = TrialBalanceEntry(account_name=r6, group=right_group)
-            if is_pl:
-                e.credit = r_leaf if r_leaf >= 0 else 0.0
-                e.debit  = abs(r_leaf) if r_leaf < 0 else 0.0
-            else:
-                e.debit  = r_leaf if r_leaf >= 0 else 0.0
-                e.credit = abs(r_leaf) if r_leaf < 0 else 0.0
-            entries.append(e)
+    # Emit group-only totals for groups that produced no detail entries.
+    for g, (amt, ptd) in group_total.items():
+        if group_leaves.get(g, 0) == 0:
+            _emit(g, g, amt, ptd)
 
     return entries
 
@@ -547,6 +612,22 @@ def _detect_pdf_groups(pairs: List[Tuple[str, float]]) -> List[Tuple[str, float,
                 break
             if running_abs > abs_amt * 4 + 1000:
                 break
+
+    # Strong additional signal: a line whose name is itself a canonical
+    # Trading/P&L/Balance-Sheet SECTION is a group header (indentation is lost
+    # in PDF text, so name matching is the reliable cue).
+    _SECTIONS = {
+        'opening stock', 'closing stock', 'purchase', 'purchases', 'purchase a/c',
+        'sales', 'sales a/c', 'sale', 'direct expenses', 'indirect expenses',
+        'manufacturing expenses', 'direct income', 'indirect income',
+        'direct incomes', 'indirect incomes', 'trading account', 'capital account',
+        'current assets', 'current liabilities', 'fixed assets', 'investments',
+        'loans & advances', 'loans and advances', 'sundry debtors',
+        'sundry creditors', 'unsecured loans', 'secured loans', 'reserves & surplus',
+    }
+    for i, (name, amt) in enumerate(pairs):
+        if name.strip().lower() in _SECTIONS:
+            is_header[i] = True
 
     results = []
     current_group = ''
@@ -1107,22 +1188,41 @@ class TrialBalanceParser:
         if ext == 'pdf':
             return self._parse_pdf(file_path)
 
-        try:
-            if ext in ('xlsx', 'xls'):
-                engine = 'xlrd' if ext == 'xls' else 'openpyxl'
-                df = pd.read_excel(file_path, header=None, dtype=str, engine=engine)
-            elif ext == 'csv':
-                df = pd.read_csv(file_path, header=None, dtype=str,
-                                 engine='python', on_bad_lines='skip')
-            else:
-                raise UnsupportedFileTypeError(f"Unsupported file type: {ext}")
-        except UnsupportedFileTypeError:
-            raise
-        except Exception as e:
-            raise FileParseError(f"Failed to read file: {e}")
-
+        df = self._read_tabular(file_path, ext)
         df = df.fillna('').map(lambda x: str(x).strip())
         return self._parse_dataframe(df, file_path)
+
+    def _read_tabular(self, file_path: str, ext: str) -> pd.DataFrame:
+        """Read any tabular file, trying multiple engines so we never reject a
+        format outright. Order: native engine → the other Excel engine →
+        HTML tables (Tally/Busy often export HTML as .xls) → CSV/TSV text."""
+        attempts = []
+        if ext in ('xlsx', 'xlsm', 'ods'):
+            attempts = [('excel', 'openpyxl'), ('excel', 'xlrd'), ('html', None), ('csv', None)]
+        elif ext == 'xls':
+            attempts = [('excel', 'xlrd'), ('excel', 'openpyxl'), ('html', None), ('csv', None)]
+        elif ext in ('csv', 'tsv', 'txt'):
+            attempts = [('csv', None), ('excel', 'xlrd'), ('html', None)]
+        else:
+            attempts = [('excel', 'openpyxl'), ('excel', 'xlrd'), ('html', None), ('csv', None)]
+
+        last_err = None
+        for kind, engine in attempts:
+            try:
+                if kind == 'excel':
+                    return pd.read_excel(file_path, header=None, dtype=str, engine=engine)
+                if kind == 'html':
+                    tables = pd.read_html(file_path)  # returns list of DataFrames
+                    if tables:
+                        return max(tables, key=lambda t: t.shape[0]).astype(str)
+                if kind == 'csv':
+                    sep = '\t' if ext == 'tsv' else None
+                    return pd.read_csv(file_path, header=None, dtype=str, sep=sep,
+                                       engine='python', on_bad_lines='skip')
+            except Exception as e:  # try the next strategy
+                last_err = e
+                continue
+        raise FileParseError(f"Failed to read file (all parsers tried): {last_err}")
 
     def _parse_dataframe(self, df: pd.DataFrame, source: str = '') -> List[TrialBalanceEntry]:
         # Strategy A: Standard Dr/Cr header
@@ -1133,18 +1233,21 @@ class TrialBalanceParser:
                 logger.info("Parsed %d TB entries (standard) from %s", len(entries), source)
                 return entries
 
+        # Strategy C (preferred): two-sided PARTICULARS/Account + Amount layout.
+        # This handles both indented and flat group/leaf structures and feeds
+        # the master grouping dictionary, so prefer it when a clear two-sided
+        # header is present.
+        if _is_particulars_two_column(df):
+            entries = _parse_particulars_two_column(df, is_pl_hint=_filename_is_pl(source))
+            if entries:
+                logger.info("Parsed %d TB entries (two-column) from %s", len(entries), source)
+                return entries
+
         # Strategy B: Balance Sheet Liabilities/Assets layout
         if _is_balance_sheet_format(df):
             entries = _parse_balance_sheet_format(df)
             if entries:
                 logger.info("Parsed %d TB entries (BS/PL) from %s", len(entries), source)
-                return entries
-
-        # Strategy C: PARTICULARS/AMOUNT two-column
-        if _is_particulars_two_column(df):
-            entries = _parse_particulars_two_column(df)
-            if entries:
-                logger.info("Parsed %d TB entries (PARTICULARS two-col) from %s", len(entries), source)
                 return entries
 
         raise FileParseError(
