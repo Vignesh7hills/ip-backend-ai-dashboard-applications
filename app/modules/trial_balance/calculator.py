@@ -288,23 +288,143 @@ _ALIASES: Dict[str, str] = {
     'salary':                          'COMPENSATION TO EMPLOYEES',
     'salary a/c':                      'COMPENSATION TO EMPLOYEES',
     'salary a/c.':                     'COMPENSATION TO EMPLOYEES',
+    'salary expenses':                 'COMPENSATION TO EMPLOYEES',
+    'salary expense':                  'COMPENSATION TO EMPLOYEES',
     'bonus':                           'COMPENSATION TO EMPLOYEES',
     'allowances':                      'COMPENSATION TO EMPLOYEES',
-    'audit fees':                      'INDIRECT EXPENSES',
+    # Shares / investments
+    'shares vsb':                      'SHARES',
+    'shares vsb a/c':                  'SHARES',
+    'vyankateshwara sah.bank ltd. shares': 'SHARES',
+    # Unsecured loans — home loans from banks are still unsecured if no collateral recorded
+    'hdfc home loan':                  'UNSECURED LOANS',
+    'hdfc home loan a/c':              'UNSECURED LOANS',
+    # Specific account names from desired output
+    'interest on income tax':          'INDIRECT INCOMES',
+    'rate difference':                 'OTHER INCOMES',
+    'other income':                    'OTHER INCOMES',
+    'other incomes':                   'OTHER INCOMES',
+    # Interest received → INTEREST RECEIVED not INDIRECT INCOMES
+    'interest received':               'INTEREST RECEIVED',
+    'interest received a/c':           'INTEREST RECEIVED',
+    # TDS / GST current assets
+    'tds receivable':                  'BALANCE WITH REVENUE AUTHORITY',
+    'tds recivable':                   'BALANCE WITH REVENUE AUTHORITY',
+    'tcs receivable':                  'BALANCE WITH REVENUE AUTHORITY',
+    'advance tax':                     'BALANCE WITH REVENUE AUTHORITY',
+    'advance income tax':              'BALANCE WITH REVENUE AUTHORITY',
+    'gst a/c':                         'OTHER CURRENT ASSETS',
+    'gst':                             'OTHER CURRENT ASSETS',
+    'input gst':                       'OTHER CURRENT ASSETS',
+    'input c. gst':                    'OTHER CURRENT ASSETS',
+    'input s. gst':                    'OTHER CURRENT ASSETS',
+    'igst':                            'OTHER CURRENT ASSETS',
+    'c gst electronic cash ledger':    'OTHER CURRENT ASSETS',
+    's gst electronic cash ledger':    'OTHER CURRENT ASSETS',
+    'i gst electronic cash ledger':    'OTHER CURRENT ASSETS',
+    'input i. gst a/c':                'OTHER CURRENT ASSETS',
+    'input s. gst a/c':                'OTHER CURRENT ASSETS',
+    # TDS/TCS Payable → PROVISIONS (current liability)
+    'tds payable':                     'PROVISIONS',
+    'tcs payable':                     'PROVISIONS',
+    'output c. gst':                   'PROVISIONS',
+    'output s. gst':                   'PROVISIONS',
+    'output igst':                     'PROVISIONS',
+    # Broker / commission agents → Sundry Creditors
+    'broker':                          'SUNDRY CREDITORS',
+    'broker master':                   'SUNDRY CREDITORS',
+    # Postage → OTHER EXPENSES (not TELEPHONE)
+    'postage & courier':               'OTHER EXPENSES',
+    'postage and courier':             'OTHER EXPENSES',
+    'postage':                         'OTHER EXPENSES',
+    # Ganesh → CAPITAL (deity-named proprietor capital account)
+    'shri ganeshji maharaj':           'CAPITAL',
+    'ganeshji maharaj':                'CAPITAL',
+    # Auditors remuneration
+    'audit fees':                      'AUDITORS REMUNERATION',
+    'audit fee':                       'AUDITORS REMUNERATION',
+    'auditors remuneration':           'AUDITORS REMUNERATION',
+    'auditor fees':                    'AUDITORS REMUNERATION',
+    'ca fees':                         'AUDITORS REMUNERATION',
+    'audit & gst fee':                 'AUDITORS REMUNERATION',
+    'audit and gst fee':               'AUDITORS REMUNERATION',
+    # GST/duties
     'gst payment':                     'DUTIES AND TAXES',
+    # Travelling
     'travelling exp.':                 'TRAVELLING',
     'travelling':                      'TRAVELLING',
+    'travelling expenses':             'TRAVELLING',
+    'travelling expense':              'TRAVELLING',
+    'travelling charges':              'TRAVELLING',
+    # Vehicle / conveyance
+    'vehicle exp.':                    'CONVEYANCE',
+    'vehicle expenses':                'CONVEYANCE',
+    'vehicle expense':                 'CONVEYANCE',
+    'vehicle charges':                 'CONVEYANCE',
+    'conveyance':                      'CONVEYANCE',
+    # Telephone / mobile
+    'mobile exp.':                     'TELEPHONE',
+    'mobile expenses':                 'TELEPHONE',
+    'mobile recharge':                 'TELEPHONE',
+    'telephone':                       'TELEPHONE',
+    'telephone expenses':              'TELEPHONE',
+    'postage & courier':               'TELEPHONE',
+    'postage and courier':             'TELEPHONE',
+    # Freight / transport
     'transport exp.':                  'FREIGHT',
     'transport charges':               'FREIGHT',
+    'transport expense':               'FREIGHT',
     'hamali exp.':                     'FREIGHT',
     'hamali':                          'FREIGHT',
     'vahatuk':                         'FREIGHT',
     'carriage outward':                'FREIGHT',
+    # Interest
     'interest paid a/c.':              'INTEREST PAID',
+    'interest paid a/c':               'INTEREST PAID',
+    'interest a/c.':                   'INTEREST PAID',
     'interest received a/c':           'INTEREST RECEIVED',
+    'interest received':               'INTEREST RECEIVED',
+    # Insurance
     'vehicle insurance':               'INSURANCE',
     'stock insuranse':                 'INSURANCE',
+    'insurance':                       'INSURANCE',
+    # Depreciation
     'depreciation':                    'DEPRECIATION',
+    'deprication':                     'DEPRECIATION',
+    'depriction':                      'DEPRECIATION',
+    # Power and fuel
+    'electricity exp.':                'POWER AND FUEL',
+    'electricity expenses':            'POWER AND FUEL',
+    'electricity expense':             'POWER AND FUEL',
+    'electricity':                     'POWER AND FUEL',
+    'electricity charges':             'POWER AND FUEL',
+    'light bill':                      'POWER AND FUEL',
+    'light bill a/c':                  'POWER AND FUEL',
+    # Commission paid
+    'brokerage':                       'COMMISSION PAID',
+    'brokerage a/c':                   'COMMISSION PAID',
+    'commission':                      'COMMISSION PAID',
+    'bank charges':                    'COMMISSION PAID',
+    'bank commission':                 'COMMISSION PAID',
+    'bank account renewal fees':       'COMMISSION PAID',
+    'bank audit':                      'OTHER EXPENSES',
+    'emi return charges':              'OTHER EXPENSES',
+    # Other expenses (catch-all for misc P&L items)
+    'office expenses':                 'OTHER EXPENSES',
+    'office expenses a/c':             'OTHER EXPENSES',
+    'office exp.':                     'OTHER EXPENSES',
+    'stationary exp':                  'OTHER EXPENSES',
+    'stationery exp':                  'OTHER EXPENSES',
+    'stationery':                      'OTHER EXPENSES',
+    'legal expenses':                  'OTHER EXPENSES',
+    'legal exp.':                      'OTHER EXPENSES',
+    'computer expenses':               'OTHER EXPENSES',
+    'computer annual charges':         'OTHER EXPENSES',
+    'software amc':                    'OTHER EXPENSES',
+    'packing charges':                 'OTHER EXPENSES',
+    'gst late fee':                    'OTHER EXPENSES',
+    'gst expenses':                    'OTHER EXPENSES',
+    'discount':                        'OTHER EXPENSES',
     'bad debts':                       'BAD DEBTS',
     'donation':                        'DONATION',
     # Direct (trading) expenses per master reference
@@ -396,27 +516,45 @@ _KEYWORD_MAP = [
      'SALES A/C'),
     (['ganesh', 'ganeshji'],
      'CAPITAL'),
-    # Common P&L expense patterns (last-resort, after exact aliases/master map).
-    (['repair', 'maintenance', 'maintainance'],
-     'REPAIR & MAINTENANCE'),
+    # Specific expense categories — checked BEFORE the generic INDIRECT_EXPENSES guard
+    (['depreciation', 'deprication', 'depriction'],
+     'DEPRECIATION'),
+    (['insurance'],
+     'INSURANCE'),
+    (['brokerage', 'commission'],
+     'COMMISSION PAID'),
+    (['salary', 'salaries', 'bonus', 'remuneration to partner'],
+     'COMPENSATION TO EMPLOYEES'),
+    (['interest received'],
+     'INTEREST RECEIVED'),
     (['interest'],
      'INTEREST PAID'),
-    (['godown rent', 'office rent', 'rent &', 'rent and', 'rent a/c'],
-     'RENT'),
-    (['wages'],
-     'DIRECT WAGES'),
-    (['commission'],
-     'COMMISSION PAID'),
+    (['travelling', 'travel exp'],
+     'TRAVELLING'),
+    (['vehicle exp', 'conveyance'],
+     'CONVEYANCE'),
+    (['mobile', 'telephone', 'postage'],
+     'TELEPHONE'),
+    (['electricity', 'light bill', 'power and fuel', 'power & fuel'],
+     'POWER AND FUEL'),
+    (['freight', 'cartage', 'hamali', 'vahatook', 'vahatuk', 'transport', 'carriage'],
+     'FREIGHT'),
+    (['repair', 'maintenance', 'maintainance'],
+     'REPAIR & MAINTENANCE'),
     (['profession tax', 'professional tax'],
      'RATES AND TAXES'),
     (['donation'],
      'DONATION'),
-    (['insurance'],
-     'INSURANCE'),
-    (['depreciation'],
-     'DEPRECIATION'),
-    (['freight', 'cartage', 'hamali', 'vahatook', 'vahatuk', 'transport'],
-     'FREIGHT'),
+    (['rent'],
+     'RENT'),
+    (['bank charge', 'bank commission', 'bank renewal', 'bank audit'],
+     'COMMISSION PAID'),
+    (['advertisement', 'publicity'],
+     'ADVERTISEMENT'),
+    # Catch-all for misc P&L items with expense keywords
+    (['office exp', 'stationary', 'stationery', 'legal exp', 'computer exp',
+      'software', 'packing', 'gst late fee', 'discount', 'printing'],
+     'OTHER EXPENSES'),
 ]
 
 # ── Context-aware group inference ─────────────────────────────────────────────
@@ -437,6 +575,9 @@ _SCHEDULE_SECTION_MAP: Dict[str, str] = {
     'CURRENT LIABILITIES': 'PROVISIONS',
     'DUTIES AND TAXES': 'DUTIES AND TAXES',
     'BROKERS (SALE COMMISSION AGENTS)': 'SUNDRY CREDITORS',
+    'BROKER': 'SUNDRY CREDITORS',
+    'BROKER MASTER': 'SUNDRY CREDITORS',
+    'BROKER A/C': 'SUNDRY CREDITORS',
     'PROVISION': 'PROVISIONS',
     'SUNDRY CREDITORS': 'SUNDRY CREDITORS',
     'SUNDRY CREDITORS MILL': 'SUNDRY CREDITORS',
@@ -447,6 +588,8 @@ _SCHEDULE_SECTION_MAP: Dict[str, str] = {
     'CASH AND BANK BALANCES': 'CASH AND BANK',
     'LOANS / ADVANCES A/C': 'LOANS AND ADVANCES (ASSETS)',
     'LOANS AND ADVANCES A/C': 'LOANS AND ADVANCES (ASSETS)',
+    'LOANS AND ADVANCES (ASSETS)': 'LOANS AND ADVANCES (ASSETS)',
+    'NATWAR K RATHI': 'LOANS AND ADVANCES (ASSETS)',  # party-name sub-group of advances
     'SUNDRY DEBTORS': 'SUNDRY DEBTORS',
     'SUNDRY RECEIVABLES': 'SUNDRY DEBTORS',
     'FIXED ASSETS': 'FIXED ASSETS',
@@ -498,6 +641,22 @@ def _match(text: str) -> Optional[str]:
     # 1b) Master reference ledger→group map (client's authoritative dictionary).
     if key in _MASTER_LEDGER_MAP:
         return _MASTER_LEDGER_MAP[key]
+
+    # 1c) Try without trailing A/c / Account suffix (catches "Salary A/c.", "Brokerage A/c" etc.)
+    import re
+    stripped = re.sub(r'\s*(a/c\.?|account|ac\.?)\s*$', '', key).strip()
+    if stripped and stripped != key:
+        result = _match(stripped)
+        if result:
+            return result
+
+    # 1d) Keyword-based lookup BEFORE the broad expense guard so specific
+    #     mappings (INSURANCE, DEPRECIATION, FREIGHT etc.) win over
+    #     the generic INDIRECT_EXPENSES fallback.
+    for keywords, target in _KEYWORD_MAP:
+        if any(kw in key for kw in keywords):
+            return target
+
     # 2) Balance-sheet PARTY/LIABILITY indicator outranks the expense guard:
     #    "Sundry Creditors for Expenses" (often PDF-truncated to "...EXPENS")
     #    is a liability, never a P&L expense, despite containing "exp".
@@ -514,20 +673,26 @@ def _match(text: str) -> Optional[str]:
     # 3) Standalone asset ledger names.
     if key in _ASSET_TERMS:
         return 'FIXED ASSETS'
-    # 4) Keyword substring fallback.
-    for keywords, target in _KEYWORD_MAP:
-        if any(kw in key for kw in keywords):
-            return target
-    # 5) Retry once without a trailing "A/c" / "Account" suffix so ledgers like
-    #    "Brokerage A/c" or "Depreciation A/c." still classify.
-    import re
-    stripped = re.sub(r'\s*(a/c\.?|account)\s*$', '', key).strip()
-    if stripped and stripped != key:
-        return _match(stripped)
     return None
 
 
 def _normalise(group: str, account_name: str = '') -> str:
+    # Generic/catch-all groups from the input file that should be overridden
+    # by more specific account-name-based classification. When the XLS Group
+    # column just says "INDIRECT EXPENSES" or "PROVISIONS", the account name
+    # often carries enough signal to assign a better specific group.
+    _GENERIC_OVERRIDE_GROUPS = {
+        'INDIRECT EXPENSES', 'INDIRECT INCOMES', 'PROVISIONS',
+        'DUTIES AND TAXES', 'OTHER CURRENT ASSETS', 'UNGROUPED', '',
+    }
+    grp_upper = (group or '').strip().upper()
+
+    # 0) For generic groups, try account name first for a specific match.
+    if grp_upper in _GENERIC_OVERRIDE_GROUPS and account_name:
+        name_match = _match(account_name)
+        if name_match and name_match not in _GENERIC_OVERRIDE_GROUPS:
+            return name_match
+
     # 1) Trust an explicit, recognised Group column first.
     matched = _match(group)
     if matched:
@@ -535,7 +700,6 @@ def _normalise(group: str, account_name: str = '') -> str:
 
     # 1b) If the group name itself is a section-header canonical name
     #     (set by Format J parser), resolve it directly.
-    grp_upper = (group or '').strip().upper()
     if grp_upper in _SCHEDULE_SECTION_MAP:
         return _SCHEDULE_SECTION_MAP[grp_upper]
 
