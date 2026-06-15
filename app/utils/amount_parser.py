@@ -41,6 +41,10 @@ def parse_amount(text: str) -> float:
     text = text.strip()
     if not text:
         return 0.0
+    # pandas NaN/None cells stringify to 'nan'/'none' — and float('nan')
+    # parses successfully, silently poisoning every downstream sum.
+    if text.lower() in ('nan', 'none', 'null', 'nat', 'inf', '-inf'):
+        return 0.0
     if _ZERO_RE.match(text):
         return 0.0
 
@@ -68,6 +72,8 @@ def parse_amount(text: str) -> float:
 
     try:
         val = float(cleaned)
+        if val != val or val in (float('inf'), float('-inf')):
+            return 0.0
         return -val if negative else val
     except ValueError:
         return 0.0
