@@ -2081,6 +2081,7 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                         'grand total', 'end of report',
                         'reporting date', 'page 1 of', 'page no',
                         'liabilities amount', 'assets amount',
+                        'page of', 'page 2 of', 'total :', 'total:',
                     )
                     _pl_title_skip = ('profit and loss', 'profit & loss', 'trading profit')
                     if any(nl.startswith(sk) for sk in _unconditional_skip):
@@ -2123,10 +2124,28 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                                     right_orphan_amt = _parse_num(best['text'])
                         continue
 
-                    # We have a name — check if it's a section header or a leaf entry
-                    # If the name is a known section keyword, always update the group.
-                    is_section_name = (nl in _J_SECTION_KW or
-                                       any(nl.startswith(kw) for kw in _J_SECTION_KW))
+                    # We have a name — check if it's a section header or a leaf entry.
+                    # A name is a section keyword when it:
+                    #   (a) exactly matches a keyword, OR
+                    #   (b) starts with a keyword AND the remainder is only a short
+                    #       suffix like " a/c", " account", " a/cs", " (assets)" etc.
+                    # We do NOT match if the remainder is a substantive word like
+                    # "write-off", "commission agents" — those are leaf account names.
+                    _ALLOWED_SUFFIXES = {
+                        '', 'a/c', 'ac', 'account', 'accounts', 'a/cs',
+                        'mill', 'mills', '(assets)', '(asset)',
+                        '(liability)', '(liabilities)',
+                    }
+                    def _is_section_kw(name_lower: str) -> bool:
+                        if name_lower in _J_SECTION_KW:
+                            return True
+                        for kw in _J_SECTION_KW:
+                            if name_lower.startswith(kw):
+                                suffix = name_lower[len(kw):].strip().lstrip('/').lstrip('(').strip()
+                                if suffix in _ALLOWED_SUFFIXES:
+                                    return True
+                        return False
+                    is_section_name = _is_section_kw(nl)
 
                     if not amt_tokens:
                         # No amount → section header or name waiting for orphan amount
@@ -2149,13 +2168,22 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                                     left_orphan_amt = None
                                 else:
                                     right_orphan_amt = None
-                            else:
+                            elif is_section_name:
+                                # Known section keyword → update group AND set pending
                                 canonical = _resolve_section(name_str, side_name)
                                 if side_name == 'L':
                                     left_group = canonical
                                     left_pending_name = name_str
                                 else:
                                     right_group = canonical
+                                    right_pending_name = name_str
+                            else:
+                                # Not a section keyword — just a leaf name waiting for
+                                # its amount on a later row. Set pending but do NOT
+                                # change the current group context.
+                                if side_name == 'L':
+                                    left_pending_name = name_str
+                                else:
                                     right_pending_name = name_str
                         elif orphan is not None:
                             # Noise name — clear the orphan rather than leaving it dangling
@@ -2203,44 +2231,91 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                                 right_orphan_amt = None
 
     # ── Post-pass: collapse subtotal/group rows that also carried amounts ────
-    # Section headers with printed totals (and schedule subtotals) get emitted
-    # alongside their detail rows, double counting. We collapse per-side using
-    # SIGNED amounts (negative entries stay in the same side they were emitted on
-    # rather than being flipped to the other side). This lets the collapse engine
-    # see Purchase(+2154M) alongside its negative-amount children like
-    # Yarn Purchase Return(-4.57M) and sum-match correctly.
+    # Section headers with printed totals get emitted alongside their detail rows,
+    # double-counting. We collapse per-side, but use the entry's ORIGINAL _EMIT GROUP
+    # to decide which collapse side it belongs to (not just its Dr/Cr balance).
+    #
+    # This handles the common PDF pattern where "contra" entries (Yarn Sales Return,
+    # Weight Shortage) appear on the right/Cr column but end up as Dr entries because
+    # their amount is negative. By routing them to the Cr-side collapse instead of
+    # the Dr-side collapse, group headers like "Expenses Direct (t&m)" can correctly
+    # sum their remaining Dr-only children.
+    #
+    # Known Cr-type group names (these entries go to the Cr collapse regardless of Dr/Cr balance):
+    _CR_TYPE_GROUPS = {
+        'sales a/c', 'sales accounts', 'sales',
+        'closing stock', 'closing stock a/c',
+        'indirect incomes', 'indirect income',
+        'other incomes', 'other income', 'direct incomes', 'direct income',
+    }
+    def _is_cr_group(grp: str) -> bool:
+        return (grp or '').lower().strip() in _CR_TYPE_GROUPS
+
     final: List[TrialBalanceEntry] = []
+    # Track Cr entries included as negatives in the Dr pass — must not appear in Cr pass.
+    dr_contra_entries: set = set()
     for side_is_dr in (True, False):
-        # Collect entries that PRIMARILY belong to this side (debit entries for Dr pass,
-        # credit entries for Cr pass) — but also include same-side negative entries
-        # (entries whose "primary" side is this side but whose amount ended up negative,
-        # flipping them to the other side in _emit). We detect these by checking if they
-        # are listed with debit=0,credit>0 but the PDF row was on the Dr/left side; we
-        # can't recover the original side after _emit without tracking it, so instead we
-        # use a simpler invariant: on each side pass, collect ALL remaining entries
-        # as signed amounts, collapse, then claim the output for this side.
-        #
-        # More precisely: on the Dr pass, collect everything that has debit>0 (positive Dr)
-        # plus credit entries that were emitted as Cr due to sign-flip of a Dr-side amount.
-        # Since we can't distinguish these after _emit, we handle them via the signed approach:
-        # for the Dr pass, include entries where debit > 0; for the Cr pass, entries where
-        # credit > 0. Negative children (flipped to Cr) will appear in the Cr pass at their
-        # correct magnitude. The collapse for the Dr pass may still not sum-match if negatives
-        # are missing, but this is an inherent limitation of per-side processing.
-        # The Kaliya and JHANWAR PDFs that formerly worked still work here.
-        side_rows = [e for e in entries
-                     if (side_is_dr and e.debit > 0) or (not side_is_dr and e.credit > 0)]
-        pairs = [(e.account_name, e.debit if side_is_dr else e.credit)
-                 for e in side_rows]
-        groups = {e.account_name: e.group for e in side_rows}
-        leaves = _normalize_profit_leaves(_collapse_side_pairs(pairs))
-        for name, amt, grp in leaves:
-            e = TrialBalanceEntry(account_name=name,
-                                  group=grp or groups.get(name, ''))
-            if side_is_dr:
-                e.debit = abs(amt)
+        side_rows: List[TrialBalanceEntry] = []
+        signs: List[float] = []
+
+        # Track which entries are included as negatives in the Dr pass — these
+        # must not appear again in the Cr pass.
+
+        for e in entries:
+            if is_pl and _is_cr_group(e.group):
+                # P&L Cr-type group → Cr side.
+                # Normal Cr income entries: sign=+1.
+                # Dr entries within a Cr-type group are contra items (sales returns,
+                # discounts) that REDUCE the income total. They go into the Cr-side
+                # collapse as NEGATIVE amounts so the group header (Sales) can correctly
+                # net them: Sales(2200M) = Cotton(8.1M) - WeightShortage(36k) + Yarn(2210M) - Return(18.3M).
+                if not side_is_dr:
+                    side_rows.append(e)
+                    if e.debit > 0:
+                        signs.append(-1.0)   # contra/return → negative deduction
+                    else:
+                        signs.append(+1.0)   # normal income
             else:
-                e.credit = abs(amt)
+                if side_is_dr:
+                    if e.debit > 0:
+                        side_rows.append(e)
+                        signs.append(+1.0)
+                    elif e.credit > 0 and is_pl:
+                        # Cr entry with a Dr-type group (e.g. Yarn Purchase Return in
+                        # PURCHASE A/C) → include in Dr pass as negative so group headers
+                        # can match the signed net total.
+                        side_rows.append(e)
+                        signs.append(-1.0)
+                        dr_contra_entries.add(id(e))
+                else:
+                    if e.credit > 0 and id(e) not in dr_contra_entries:
+                        # Exclude entries already consumed as negatives in the Dr pass
+                        side_rows.append(e)
+                        signs.append(+1.0)
+
+        pairs = [(e.account_name,
+                  s * (e.debit if e.debit > 0 else e.credit))
+                 for e, s in zip(side_rows, signs)]
+
+        # Name → original group (last entry wins for true duplicates).
+        name_to_orig_grp = {e.account_name: e.group for e in side_rows}
+        leaves = _normalize_profit_leaves(_collapse_side_pairs(pairs))
+        for name, amt, collapse_grp in leaves:
+            orig_grp = name_to_orig_grp.get(name, '')
+            e = TrialBalanceEntry(account_name=name,
+                                  group=orig_grp or collapse_grp)
+            if side_is_dr:
+                if amt >= 0:
+                    e.debit = abs(amt)
+                else:
+                    # Negative amount in Dr pass = a contra/return item → Cr
+                    e.credit = abs(amt)
+            else:
+                if amt >= 0:
+                    e.credit = abs(amt)
+                else:
+                    # Negative amount in Cr pass = a contra/deduction item → Dr
+                    e.debit = abs(amt)
             final.append(e)
     entries = final
 
