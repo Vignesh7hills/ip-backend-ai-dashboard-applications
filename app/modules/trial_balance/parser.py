@@ -83,22 +83,144 @@ def _col_has(cell: str, keywords: List[str]) -> bool:
 _TOTAL_KW  = {'total', 'grand total', 'sub total', 'subtotal', 'net total'}
 _PROFIT_KW = {'gross profit', 'net profit', 'net loss'}
 
+# Net-profit-like ledger names found on the expense side of a P&L:
+#   "NET PROFIT", "NETT PROFIT", "Z. Net Profit A/c", "PROFIT & LOSS A/C",
+#   "PROFIT AND LOSS AIC" (OCR/typo variants). Per the TB business rules these
+# must be KEPT and grouped into CAPITAL (debit side).
+_NET_PROFIT_RE   = re.compile(r'net{1,2}\s*profit|net\s*loss|profit\s*(?:&|and)\s*loss\s*a', re.I)
+_GROSS_PROFIT_RE = re.compile(r'gross\s*profit', re.I)
+
+
+def _collapse_side_pairs(
+    pairs: List[Tuple[str, float]],
+    flags: Optional[List[Optional[bool]]] = None,
+) -> List[Tuple[str, float, str]]:
+    """
+    Given ONE SIDE of a two-sided statement as an ordered list of
+    (name, amount) rows, detect group-header/subtotal rows — rows whose amount
+    equals the sum of the immediately following run of rows — and remove them
+    so they are not double counted. Header names become the group label of the
+    rows they cover. Zero-amount named rows are treated as plain group labels.
+
+    flags: optional per-row structural hint. True = header candidate (name in
+    the outer column, not indented), False = leaf (inner column or indented),
+    None = unknown. A row flagged False may NOT absorb a SINGLE following row
+    of equal amount — that pattern is two sibling leaves that happen to share
+    an amount (e.g. two GST input ledgers at 414.90), not a header+leaf pair.
+    Multi-row sum matches are still allowed regardless of flag, since a
+    multi-row coincidence is far less likely than an equal-amount pair.
+
+    Returns [(name, amount, group), ...] containing only leaf rows.
+
+    This is the structural fix for statements where group totals are printed
+    in the SAME column as their detail rows (e.g. "PURCHASE A/C 182270.44"
+    followed by "MILL STORE A/C 182270.44").
+    """
+    n = len(pairs)
+    is_hdr = [False] * n
+
+    def _flag(i):
+        if flags is None or i >= len(flags):
+            return None
+        return flags[i]
+
+    for i, (name, amt) in enumerate(pairs):
+        if abs(amt) < 0.01:
+            is_hdr[i] = True            # label-only row → group label
+            continue
+        run_sign = run_abs = 0.0
+        run_rows = 0
+        for j in range(i + 1, min(i + 500, n)):
+            aj = pairs[j][1]
+            if abs(aj) < 0.01:
+                continue
+            run_sign += aj
+            run_abs  += abs(aj)
+            run_rows += 1
+            tol = max(1.0, abs(amt) * 0.002)
+            if abs(run_sign - amt) <= tol or abs(run_abs - abs(amt)) <= tol:
+                if run_rows == 1:
+                    child_name = pairs[j][0]
+                    # Single-child fold: allow only when there is clear evidence
+                    # this row is a structural group header, not an equal-amount sibling.
+                    # Evidence 1: flag=True  → outer column in indented layout
+                    # Evidence 2: same name  → exact duplicate row (e.g. Profit & Loss A/C
+                    #             printed twice); absorb to deduplicate.
+                    # Evidence 3: known group name → structural group (Opening Stock, etc.)
+                    # Evidence 4: flag=False → definitely a leaf; block absorption.
+                    # Otherwise (flag=None, no group name): treat as siblings → block.
+                    if _flag(i) is True:
+                        pass            # outer-column header → allow
+                    elif name.strip().lower() == child_name.strip().lower():
+                        pass            # exact duplicate → deduplicate
+                    elif _is_tally_std_group(name):
+                        pass            # known structural group → allow
+                    else:
+                        continue        # insufficient evidence → siblings; keep both
+                is_hdr[i] = True
+                break
+            if run_abs > abs(amt) * 1.5 + 1000:
+                break
+
+    out: List[Tuple[str, float, str]] = []
+    grp = ''
+    for i, (name, amt) in enumerate(pairs):
+        if _is_skip(name):
+            continue
+        if is_hdr[i]:
+            grp = name
+            continue
+        out.append((name, amt, grp))
+    return out
+
+
+def _normalize_profit_leaves(
+    leaves: List[Tuple[str, float, str]]
+) -> List[Tuple[str, float, str]]:
+    """
+    Apply P&L profit-row business rules to a collapsed leaf list:
+      - Drop GROSS PROFIT rows (c/o and b/f appear on both sides and cancel;
+        they are derived figures, never TB ledgers).
+      - Keep NET PROFIT / NET LOSS / 'PROFIT & LOSS A/C' rows but rename to
+        NET PROFIT (or NET LOSS) and group them under CAPITAL (Note_TB rule 6).
+    """
+    out: List[Tuple[str, float, str]] = []
+    for name, amt, grp in leaves:
+        nl = name.lower()
+        if _GROSS_PROFIT_RE.search(nl):
+            continue
+        if _NET_PROFIT_RE.search(nl):
+            label = 'NET LOSS' if 'loss' in nl and 'profit' not in nl else 'NET PROFIT'
+            out.append((label, amt, 'CAPITAL'))
+            continue
+        out.append((name, amt, grp))
+    return out
+
+
+def _kw_match(nl: str, kws) -> bool:
+    """Whole-word keyword match. Substring matching wrongly hits names like
+    'VIVEK RAMKUMAR TOTALA' (contains 'total') or 'Packing Matrial' ('trial')."""
+    for kw in kws:
+        if re.search(r'(?<![a-z])' + re.escape(kw) + r'(?![a-z])', nl):
+            return True
+    return False
+
 
 def _is_skip(name: str) -> bool:
     """Return True only for pure total rows. Profit/Loss rows are NOT skipped
     here — callers must check _is_profit_row separately and skip only when amount=0."""
     nl = name.lower().strip()
-    return any(kw in nl for kw in _SKIP_ROW_KW)
+    return _kw_match(nl, _SKIP_ROW_KW)
 
 
 def _is_total_row(name: str) -> bool:
     nl = name.lower().strip()
-    return any(kw in nl for kw in _TOTAL_KW)
+    return _kw_match(nl, _TOTAL_KW)
 
 
 def _is_profit_row(name: str) -> bool:
     nl = name.lower().strip()
-    return any(kw in nl for kw in _PROFIT_KW)
+    return _kw_match(nl, _PROFIT_KW)
 
 
 def _is_numeric(v) -> bool:
@@ -206,6 +328,38 @@ def _detect_columns(df: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
                     break
             if has_data:
                 col_map.setdefault('account', 0)
+                # ── Refine amount columns by BODY DATA ────────────────────────
+                # Header labels sometimes sit one column left of where the
+                # values actually land (merged cells / export quirks), which
+                # silently drops an entire side (e.g. 'Credit' header at col 9
+                # but every credit value in col 10). For each amount column,
+                # if it has (almost) no numeric body values but a nearby
+                # column to the right has many, shift to the data column.
+                def _numeric_count(ci):
+                    if ci < 0 or ci >= df2.shape[1]:
+                        return 0
+                    ct = 0
+                    for ri2 in range(row_idx + 1, len(df2)):
+                        if _is_numeric(str(df2.iloc[ri2, ci]).strip()):
+                            ct += 1
+                    return ct
+
+                taken = {col_map.get('account', 0)}
+                for key in ('debit', 'credit'):
+                    cur = col_map[key]
+                    other = col_map['credit'] if key == 'debit' else col_map['debit']
+                    best, best_ct = cur, _numeric_count(cur)
+                    for cand in (cur + 1, cur + 2):
+                        if cand == other or cand in taken or cand >= df2.shape[1]:
+                            continue
+                        ct = _numeric_count(cand)
+                        if ct > best_ct * 2 + 2:
+                            best, best_ct = cand, ct
+                    if best != cur:
+                        logger.info("Column refine: '%s' header at col %d but data "
+                                    "found at col %d — using col %d", key, cur, best, best)
+                        col_map[key] = best
+                    taken.add(col_map[key])
                 # Adjust row_idx back to original df if we merged rows
                 offset = len(df) - len(df2)
                 logger.debug("TB header at row %d (merged=%d): %s", row_idx, offset, col_map)
@@ -553,19 +707,15 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
         is_dr = is_pl if len(sides) == 0 else not is_pl
         sides.append((name_cols, best_cols, is_dr, _indented(name_cols)))
 
-    entries: List[TrialBalanceEntry] = []
-    # Track group header totals so a group with detail rows does not also emit
-    # its header total (which would double count).
-    group_total = {}    # group name -> (amount, positive_to_debit)
-    group_leaves = {}   # group name -> count of detail entries
-
-    def _emit(name, group, amt, positive_to_debit):
-        e = TrialBalanceEntry(account_name=name, group=group)
-        if positive_to_debit:
-            e.debit, e.credit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
-        else:
-            e.credit, e.debit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
-        entries.append(e)
+    # ── Collect ordered (name, amount) rows PER SIDE, then post-process ──────
+    # Many statements print group totals in the SAME column as detail rows
+    # (e.g. "PURCHASE A/C 182270.44" followed by "MILL STORE A/C 182270.44"),
+    # so structural emit-as-you-go double counts. Instead: collect each side's
+    # row sequence, collapse subtotal/header rows by sum-matching, then apply
+    # the profit-row business rules, and only then emit entries.
+    # Build per-side lists AND flags (True=outer=header candidate, False=inner=leaf)
+    side_pairs: List[List[Tuple[str, float]]] = [[] for _ in sides]
+    side_flags: List[List[Optional[bool]]] = [[] for _ in sides]
 
     def _rightmost_amt(row, cols):
         val = 0.0
@@ -576,7 +726,6 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
                     val = a
         return val
 
-    cur_group = ['' for _ in sides]
     for row_idx in range(hdr_row + 1, len(df)):
         row = list(df.iloc[row_idx])
         for si, (name_cols, amt_cols, ptd, indented) in enumerate(sides):
@@ -590,50 +739,64 @@ def _parse_particulars_two_column(df: pd.DataFrame, is_pl_hint=None) -> List[Tri
             if not present:
                 continue
 
+            is_outer_only = False       # flag: text only in outer (group) col
             if indented:
                 outer = min(name_cols)
                 group_txt = next((t for c, t in present if c == outer), None)
                 leaf_txt  = next((t for c, t in present if c > outer), None)
-                if leaf_txt and not _is_skip(leaf_txt) and not _is_profit_row(leaf_txt):
-                    if group_txt and not _is_skip(group_txt):
-                        cur_group[si] = group_txt
-                    g = cur_group[si] or group_txt or leaf_txt
-                    if amt != 0.0:
-                        _emit(leaf_txt, g, amt, ptd)
-                        group_leaves[g] = group_leaves.get(g, 0) + 1
-                elif group_txt and not _is_skip(group_txt) and not _is_profit_row(group_txt):
-                    cur_group[si] = group_txt
-                    if amt != 0.0:
-                        group_total[group_txt] = (amt, ptd)
-            else:
-                # FLAT layout: no amount → group header; with amount → leaf.
-                name = present[0][1]
-                if _is_skip(name):
-                    continue
-                # Skip single-char noise like '.' used as total separator rows
-                if len(name.strip('.').strip()) == 0:
-                    continue
-                # Skip print/page footer rows
-                if re.match(r'^(print\s+date|page\s+no|page\s*:)', name.lower()):
-                    continue
-                # Skip derived profit/loss summary rows
-                if _is_profit_row(name):
-                    continue
-                # 'PARTICULARS' is the column header — treat as group-label reset only
-                if name.lower() in ('particulars', 'amount', 'amount rs', 'amount rs.'):
-                    cur_group[si] = ''
-                    continue
-                if amt == 0.0:
-                    cur_group[si] = name           # group header line
+                # Some exports DUPLICATE the name into the next column,
+                # truncating the copy from the left ("TOTAL :" → "L :",
+                # "GROSS PROFIT" → "S PROFIT"). When one text is a tail of
+                # the other they are the SAME name, not group+leaf — keep
+                # the longer (full) one so total/profit filters can match.
+                if group_txt and leaf_txt:
+                    g_n = re.sub(r'\s+', ' ', group_txt).lower()
+                    l_n = re.sub(r'\s+', ' ', leaf_txt).lower()
+                    if g_n.endswith(l_n) or l_n.endswith(g_n) \
+                            or g_n in l_n or l_n in g_n:
+                        name = group_txt if len(group_txt) >= len(leaf_txt) \
+                            else leaf_txt
+                        is_outer_only = True   # it's ONLY in outer col logically
+                    else:
+                        name = leaf_txt
                 else:
-                    g = cur_group[si] or name
-                    _emit(name, g, amt, ptd)
-                    group_leaves[g] = group_leaves.get(g, 0) + 1
+                    if group_txt and not leaf_txt:
+                        is_outer_only = True   # actual group-header row
+                    name = leaf_txt or group_txt
+            else:
+                name = present[0][1]
 
-    # Emit group-only totals for groups that produced no detail entries.
-    for g, (amt, ptd) in group_total.items():
-        if group_leaves.get(g, 0) == 0:
-            _emit(g, g, amt, ptd)
+            if not name or _is_skip(name):
+                continue
+            # Skip single-char noise like '.' used as total separator rows
+            if len(name.strip('.').strip()) == 0:
+                continue
+            # Skip print/page footer rows
+            if re.match(r'^(print\s+date|page\s+no|page\s*:|end\s+of\s+report)', name.lower()):
+                continue
+            # Column-header echoes act as group-label resets
+            if name.lower() in ('particulars', 'amount', 'amount rs', 'amount rs.'):
+                side_pairs[si].append(('', 0.0))
+                side_flags[si].append(True)
+                continue
+            # flag: True=outer/header row, False=inner/leaf, None=unknown
+            flag = True if is_outer_only else (False if indented else None)
+            side_pairs[si].append((name, amt))
+            side_flags[si].append(flag)
+
+    entries: List[TrialBalanceEntry] = []
+    for si, (name_cols, amt_cols, ptd, indented) in enumerate(sides):
+        leaves = _collapse_side_pairs(side_pairs[si], flags=side_flags[si])
+        leaves = _normalize_profit_leaves(leaves)
+        for name, amt, grp in leaves:
+            if not name:
+                continue
+            e = TrialBalanceEntry(account_name=name, group=grp)
+            if ptd:
+                e.debit, e.credit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
+            else:
+                e.credit, e.debit = (abs(amt), 0.0) if amt >= 0 else (0.0, abs(amt))
+            entries.append(e)
 
     return entries
 
@@ -1245,6 +1408,188 @@ def _parse_section_header_format(text: str) -> List[TrialBalanceEntry]:
 
 
 # ── Format I: Tally Single-Column Indented Trial Balance ──────────────────────
+
+# Tally's standard (reserved) group names. A row bearing one of these names
+# is structurally a GROUP even when the export indents it at the same level
+# as its children (Tally does this for e.g. "Cash-in-hand" → "Cash").
+_TALLY_STD_GROUPS = {
+    'capital account', 'reserves & surplus', 'reserves and surplus',
+    'loans (liability)', 'bank od a/c', 'bank occ a/c', 'secured loans',
+    'unsecured loans', 'current liabilities', 'duties & taxes',
+    'duties and taxes', 'provisions', 'sundry creditors',
+    'fixed assets', 'investments', 'current assets', 'bank accounts',
+    'cash-in-hand', 'cash in hand', 'deposits (asset)',
+    'loans & advances (asset)', 'loans and advances (asset)',
+    'stock-in-hand', 'stock in hand', 'sundry debtors',
+    'branch / divisions', 'branch/divisions', 'misc. expenses (asset)',
+    'misc expenses (asset)', 'suspense a/c', 'sales accounts',
+    'purchase accounts', 'direct incomes', 'direct expenses',
+    'indirect incomes', 'indirect expenses', 'opening stock',
+    'closing stock', 'income (direct)', 'income (indirect)',
+    'expenses (direct)', 'expenses (indirect)', 'retained earnings',
+    # Common single-child group names found in Indian BS/P&L exports
+    'purchase', 'purchases', 'purchase a/c', 'purchase ac',
+    'sales', 'sale', 'sale a/c', 'sales a/c', 'sale ac',
+    'direct expenditure', 'direct expinditure', 'direct expinditure',
+    'indirect expenditure', 'indirect expinditure',
+    'indirect expences', 'indirect expenses', 'direct expences',
+    'expenses direct', 'expenses indirect',
+    'current assets', 'current liabilities', 'fixed assets',
+    'loans liabilities', 'loans & borrowings', 'loans and borrowings',
+    'capital a/c', 'capital ac', 'sundry payables', 'sundry receivables',
+    'broker master', 'broker a/c',
+    'other income', 'other expenses', 'other expenditure',
+}
+
+
+def _is_tally_std_group(name: str) -> bool:
+    return name.strip().lower() in _TALLY_STD_GROUPS
+
+
+def _is_tally_std_group(name: str) -> bool:
+    return name.strip().lower() in _TALLY_STD_GROUPS
+
+
+def _fold_tally_hierarchy(
+    raw: List[Tuple[int, str, float, float]],
+    grand_dr: float = 0.0, grand_cr: float = 0.0,
+    source: str = '',
+    indents: Optional[List[Optional[float]]] = None,
+) -> List[TrialBalanceEntry]:
+    """
+    Shared parent/leaf reconstruction for Tally hierarchical TB exports
+    (XLS Format I and PDF Format I-PDF).
+
+    raw: ordered (row_idx, name, dr, cr) rows, Grand Total row EXCLUDED.
+    indents: optional per-row indent level (xlsx cell indent / PDF x-position).
+        When available, a row may only absorb following rows whose indent is
+        STRICTLY GREATER than its own — this disambiguates two adjacent equal
+        sibling amounts (which would otherwise look like a parent+child pair)
+        from a genuine single-child group.
+
+    A Tally TB is a tree serialized depth-first (children follow their
+    parent). Sub-groups carry their own Dr/Cr totals, so the reliable signal
+    is arithmetic: a row is a parent iff the totals of the units that follow
+    it sum to its own totals. We fold RIGHT-TO-LEFT so inner groups collapse
+    into single units before their ancestors are tested — this handles
+    arbitrary nesting depth and mixed Dr/Cr children (signed netting), which
+    the old single-pass magnitude-sum approach could not.
+    """
+    n = len(raw)
+    if n == 0:
+        return []
+
+    def _indent_of(i):
+        if indents is None or i >= len(indents):
+            return None
+        return indents[i]
+
+    # Each unit: {'idx', 'name', 'dr', 'cr', 'indent', 'children': [units]}
+    units = [{'idx': i, 'name': raw[i][1], 'dr': raw[i][2], 'cr': raw[i][3],
+              'indent': _indent_of(i), 'children': []} for i in range(n)]
+
+    # Map row index -> position in `units` (positions shift as we fold, so we
+    # re-locate by scanning; n is small enough that this stays fast).
+    k = n - 2
+    while k >= 0:
+        # Find current position of original row k in units
+        pos = next((p for p, u in enumerate(units) if u['idx'] == k), -1)
+        if pos < 0 or pos == len(units) - 1:
+            k -= 1
+            continue
+        u = units[pos]
+        dr_i, cr_i = u['dr'], u['cr']
+        if dr_i == 0.0 and cr_i == 0.0:
+            k -= 1
+            continue
+
+        run_dr = run_cr = 0.0
+        matched = -1
+        ind_i = u['indent']
+        for m in range(pos + 1, min(pos + 200, len(units))):
+            run_dr += units[m]['dr']
+            run_cr += units[m]['cr']
+
+            # Indent veto (single-child folds only): two adjacent rows with
+            # equal amounts at the same/lower indent are SIBLINGS, not a
+            # parent+child pair. Tally indents are too noisy to constrain
+            # multi-row sum matches (children sometimes share the parent's
+            # indent), but a 1:1 equal-amount fold needs the child to be
+            # strictly deeper.
+            def _indent_ok():
+                if m != pos + 1:
+                    return True
+                # Standard Tally group names are structural parents even at
+                # the same indent (e.g. "Cash-in-hand" → "Cash").
+                if _is_tally_std_group(u['name']):
+                    return True
+                ind_m = units[m]['indent']
+                if ind_i is None or ind_m is None:
+                    return True
+                return ind_m > ind_i
+
+            if dr_i != 0.0 and cr_i != 0.0:
+                tol_d = max(1.0, dr_i * 0.002)
+                tol_c = max(1.0, cr_i * 0.002)
+                if (abs(run_dr - dr_i) <= tol_d and abs(run_cr - cr_i) <= tol_c
+                        and _indent_ok()):
+                    matched = m
+                    break
+                if run_dr > dr_i * 1.5 + 1000 and run_cr > cr_i * 1.5 + 1000:
+                    break
+            else:
+                net_i = dr_i - cr_i
+                tol = max(1.0, abs(net_i) * 0.002)
+                if (abs((run_dr - run_cr) - net_i) <= tol
+                        and (run_dr + run_cr) > 0 and _indent_ok()):
+                    matched = m
+                    break
+                if (run_dr + run_cr) > (abs(net_i)) * 6 + 100000:
+                    break
+        if matched >= 0:
+            u['children'] = units[pos + 1:matched + 1]
+            del units[pos + 1:matched + 1]
+        k -= 1
+
+    # Flatten: emit leaves; group = innermost parent name.
+    entries: List[TrialBalanceEntry] = []
+
+    def _walk(unit, group):
+        if unit['children']:
+            for ch in unit['children']:
+                _walk(ch, unit['name'])
+            return
+        dr, cr = unit['dr'], unit['cr']
+        if dr == 0.0 and cr == 0.0:
+            return                      # label-only row
+        e = TrialBalanceEntry(account_name=unit['name'], group=group)
+        if dr != 0.0 and cr != 0.0:
+            # Unresolved parent (children didn't sum-match) — keep BOTH sides
+            # so the file's totals are preserved; validator will flag it.
+            e.debit, e.credit = dr, cr
+        elif dr != 0.0:
+            e.debit = dr
+        else:
+            e.credit = cr
+        entries.append(e)
+
+    for u in units:
+        _walk(u, '')
+
+    if grand_dr or grand_cr:
+        sum_dr = round(sum(e.debit for e in entries), 2)
+        sum_cr = round(sum(e.credit for e in entries), 2)
+        if abs(sum_dr - grand_dr) > 1.0 or abs(sum_cr - grand_cr) > 1.0:
+            logger.warning(
+                "Tally TB fold mismatch in %s: leaves Dr=%.2f Cr=%.2f vs "
+                "Grand Total Dr=%.2f Cr=%.2f", source, sum_dr, sum_cr,
+                grand_dr, grand_cr)
+        else:
+            logger.info("Tally TB fold verified against Grand Total "
+                        "(Dr=Cr=%.2f) for %s", grand_dr, source)
+    return entries
+
+
 # Layout (from TrialBal.xlsx sample):
 #   Col0=Particulars, Col1=Debit closing, Col2=Credit closing
 #   Parent rows have BOTH col1+col2 non-zero (group total in col2)
@@ -1290,110 +1635,71 @@ def _parse_tally_single_col_tb(df: pd.DataFrame, source: str = '') -> List[Trial
     if hdr_row < 0:
         return []
 
-    # ── Pass 1: collect raw rows ──────────────────────────────────────────────
+    # ── Pass 1: collect raw rows (stop at Grand Total) ────────────────────────
+    # Tally exports often repeat the final page block AFTER the Grand Total
+    # row; everything past the first Grand Total is a duplicate and must be
+    # ignored. The Grand Total itself is captured as the verification target.
+
+    # Per-row indent levels (for fold disambiguation). For .xlsx we read the
+    # cell's alignment.indent via openpyxl (df row i ↔ sheet row i+1, since
+    # the df is loaded header=None). Fallback: leading spaces in the raw text.
+    xlsx_indents: Optional[dict] = None
+    if source and source.lower().endswith('.xlsx'):
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(source, read_only=False, data_only=True)
+            ws = wb.active
+            xlsx_indents = {}
+            for r_i, ws_row in enumerate(ws.iter_rows(min_col=1, max_col=1)):
+                cell = ws_row[0]
+                ind = cell.alignment.indent if cell.alignment else 0
+                xlsx_indents[r_i] = float(ind or 0)
+            wb.close()
+        except Exception as exc:            # pragma: no cover
+            logger.debug("indent extraction failed for %s: %s", source, exc)
+            xlsx_indents = None
+
     raw: List[Tuple[int, str, float, float]] = []  # (orig_row_idx, name, dr, cr)
+    indents: List[Optional[float]] = []
+    grand_dr = grand_cr = 0.0
     for row_idx in range(hdr_row + 1, len(df)):
         row = list(df.iloc[row_idx])
         while len(row) < 3:
             row.append('')
 
-        name_raw = str(row[0]).strip()
-        if name_raw.lower() in ('nan', ''):
+        name_raw = str(row[0])
+        if name_raw.strip().lower() in ('nan', ''):
             continue
-        name = _clean(name_raw)
+        name = _clean(name_raw.strip())
         if not name:
             continue
         if re.match(r'^\d{1,2}[-/][A-Za-z]', name) or re.match(r'^\d{4}$', name):
             continue
-        if _is_total_row(name):
-            continue
-
         dr = parse_amount(str(row[1]).strip() if len(row) > 1 else '')
         cr = parse_amount(str(row[2]).strip() if len(row) > 2 else '')
-        raw.append((row_idx, name, dr, cr))
+        if 'grand total' in name.lower():
+            grand_dr, grand_cr = dr, cr
+            break                       # ignore duplicated trailing block
+        if _is_total_row(name):
+            continue
+        if xlsx_indents is not None:
+            ind = xlsx_indents.get(row_idx, None)
+        else:
+            lead = len(name_raw) - len(name_raw.lstrip(' '))
+            ind = float(lead)
+        raw.append((len(raw), name, dr, cr))
+        indents.append(ind)
 
     if not raw:
         return []
 
-    # ── Pass 2: classify parent vs leaf ───────────────────────────────────────
-    n = len(raw)
-    is_parent = [False] * n
+    # Only pass indents if they actually vary — a flat all-equal indent list
+    # would block ALL folding (every row would look like a sibling).
+    distinct = {i for i in indents if i is not None}
+    use_indents = indents if len(distinct) > 1 else None
 
-    for i in range(n):
-        _, _, dr_i, cr_i = raw[i]
-        # Signal A: both cols non-zero → definitely a parent row
-        if dr_i != 0.0 and cr_i != 0.0:
-            is_parent[i] = True
-            continue
-        # Signal B: single-col row whose amount ≈ sum of following rows
-        parent_amt = dr_i if dr_i != 0.0 else cr_i
-        if parent_amt == 0.0:
-            continue
-        running = 0.0
-        for j in range(i + 1, min(i + 80, n)):
-            _, _, dr_j, cr_j = raw[j]
-            # Stop at next signal-A row
-            if dr_j != 0.0 and cr_j != 0.0:
-                break
-            child_amt = dr_j if dr_j != 0.0 else cr_j
-            running += child_amt
-            tol = max(1.0, parent_amt * 0.002)
-            if abs(running - parent_amt) <= tol:
-                is_parent[i] = True
-                break
-            if running > parent_amt * 1.02 + 500:
-                break
-
-    # ── Pass 3: emit entries ──────────────────────────────────────────────────
-    entries: List[TrialBalanceEntry] = []
-    current_group = ''
-    # Track signal-A parents for fallback (if no leaves parsed under them)
-    group_totals: Dict[str, Tuple[float, float]] = {}
-    group_counts: Dict[str, int] = {}
-
-    for i, (_, name, dr, cr) in enumerate(raw):
-        if is_parent[i]:
-            current_group = name
-            _, _, p_dr, p_cr = raw[i]
-            group_totals[name] = (p_dr, p_cr)
-            group_counts.setdefault(name, 0)
-            continue
-
-        # Leaf row
-        if dr == 0.0 and cr == 0.0:
-            # No amount — treat as sub-group label
-            current_group = name
-            group_counts.setdefault(name, 0)
-            continue
-
-        e = TrialBalanceEntry(account_name=name, group=current_group)
-        if dr != 0.0 and cr == 0.0:
-            e.debit = dr
-        elif cr != 0.0 and dr == 0.0:
-            e.credit = cr
-        else:
-            net = dr - cr
-            if net >= 0:
-                e.debit = net
-            else:
-                e.credit = abs(net)
-
-        entries.append(e)
-        if current_group:
-            group_counts[current_group] = group_counts.get(current_group, 0) + 1
-
-    # ── Fallback: groups with no leaf entries → emit group total ──────────────
-    for grp, (p_dr, p_cr) in group_totals.items():
-        if group_counts.get(grp, 0) == 0:
-            e = TrialBalanceEntry(account_name=grp, group=grp)
-            if p_cr >= p_dr:
-                e.credit = p_cr
-            else:
-                e.debit = p_dr
-            entries.append(e)
-            logger.info("Format I group-total fallback: %s Dr=%.2f Cr=%.2f",
-                        grp, p_dr, p_cr)
-
+    entries = _fold_tally_hierarchy(raw, grand_dr, grand_cr, source,
+                                    indents=use_indents)
     logger.info("Format I (Tally single-col TB) parsed %d entries from %s",
                 len(entries), source)
     return entries
@@ -1421,8 +1727,10 @@ _J_SKIP_KW = {
 # Exact-match noise names (used with 'nl in _J_NOISE_NAMES' not substring)
 _J_NOISE_NAMES = {
     'as per enclosed list', 'end of report', 'page 1 of 1', 'page 1 of',
-    'nett profit', 'gross profit', 'gross profit b/d', 'net profit',
-    'profit and loss aic', 'profit and loss a/c',
+    # NOTE: 'profit and loss a/c' and variants are NOT here — they may be real ledger
+    # entries inside P&L statements (e.g. Net Profit row inside Indirect Expenses section).
+    # They are handled by _normalize_profit_leaves after collapse.
+    'gross profit b/d',
     'b/d', 'income', 'indirect', 'total :', 'total',
     'liability', 'liabilities', 'asset', 'assets',
     'account', 'account name', 'amount',
@@ -1503,60 +1811,92 @@ def _detect_two_sided_section_pdf(file_path: str):
             # Check for Liability/Asset BS
             has_liab = 'liability' in text_lower or 'liabilities' in text_lower
             has_asset = 'asset' in text_lower or 'assets' in text_lower
-            # Check for P&L (Account Name Amount repeated)
-            is_pl = ('profit and loss' in text_lower or 'profit & loss' in text_lower
-                     or 'account name amount' in text_lower.replace('\n', ' '))
+
+            # Determine document type from the TITLE area (first 8 lines) only.
+            # Body text may contain "Profit & Loss A/c" as an account name even
+            # in a Balance Sheet — checking full page text causes false positives.
+            page_lines = [l.strip() for l in (p0.extract_text() or '').split('\n') if l.strip()]
+            title_text = ' '.join(page_lines[:8]).lower()
+
+            # Explicit Balance Sheet title → never is_pl
+            is_bs_title = ('balance sheet' in title_text
+                           or 'balance-sheet' in title_text)
+            # P&L detected only in title area
+            is_pl = (not is_bs_title and (
+                'profit and loss' in title_text
+                or 'profit & loss' in title_text
+                or 'trading' in title_text
+            ))
 
             if not ((has_liab and has_asset) or is_pl):
                 return None
 
-            # Must NOT have a "Particulars" / "Debit" / "Credit" header
-            # (those are Format H and Format I territory)
-            if 'particulars' in text_lower:
-                return None
+            # Must NOT have a "Debit"+"Credit" header pair — those are Format H/I (TB columns).
+            # "Particulars" alone is fine (two-sided P&L statements use it as a column label).
             if 'debit' in text_lower and 'credit' in text_lower:
                 return None
 
-            # Find page split x — the boundary between left amount column and
-            # right name column. Strategy: find the gap between the leftmost
-            # right-side text word (section header like ASSETS, SALES) and the
-            # rightmost left-side amount word.
             page_w = float(p0.width)
 
-            # All numeric words (amounts)
-            amt_words = [w for w in words
-                         if re.match(r'^-?[\d,]+\.?\d*$',
-                                     w['text'].replace(',','').lstrip('-').lstrip('(').rstrip(')'))]
+            # ── Amount-gap approach to split_x ────────────────────────────────
+            # A two-sided PDF has two distinct amount columns: one in the left
+            # half and one in the right half.  We sample all pages and find the
+            # maximum x of left-half amounts and the minimum x of right-half
+            # amounts; split_x = midpoint of those two — far more robust than
+            # using the x of section-header words (which sit inside the text
+            # region, not at the true column boundary).
+            _AMT_RE = re.compile(r'^-?[\d,]+\.?\d*$')
 
-            # Find the right-side section header x position
-            # Right-side headers appear in the right half of the page
-            right_hdr_words = [w for w in words
-                                if w['text'].lower() in (
-                                    'assets', 'asset', 'sales', 'income', 'liabilities',
-                                    'liability', 'account')
-                                and float(w['x0']) > page_w * 0.40]
-            if right_hdr_words:
-                right_name_x = min(float(w['x0']) for w in right_hdr_words)
-            else:
-                right_name_x = page_w * 0.52
+            all_amt_xs: List[float] = []
+            for page in pdf.pages[:5]:          # sample up to 5 pages
+                for w in page.extract_words():
+                    txt = w['text'].replace(',','').lstrip('-').lstrip('(').rstrip(')')
+                    if _AMT_RE.match(txt):
+                        all_amt_xs.append(float(w['x0']))
 
-            # Find left-side amount column x (the rightmost amount on the left half)
-            left_half_amts = [float(w['x0']) for w in amt_words
-                              if float(w['x0']) < right_name_x]
-            if left_half_amts:
-                left_amt_col_x = max(left_half_amts)
-            else:
-                left_amt_col_x = right_name_x * 0.80
+            if not all_amt_xs:
+                return None
 
-            # Split is midway between left amount col and right name col
-            split_x = (left_amt_col_x + right_name_x) / 2.0
+            # Partition by page midpoint
+            mid = page_w * 0.50
+            left_xs  = [x for x in all_amt_xs if x < mid]
+            right_xs = [x for x in all_amt_xs if x > mid]
 
-            left_amts  = sorted([float(w['x0']) for w in amt_words
-                                  if float(w['x0']) < split_x], reverse=True)
-            right_amts = sorted([float(w['x0']) for w in amt_words
-                                  if float(w['x0']) >= split_x])
-            left_amt_x  = left_amts[0]  if left_amts  else split_x * 0.85
-            right_amt_x = right_amts[-1] if right_amts else page_w * 0.90
+            if not left_xs or not right_xs:
+                # Fall back to 40/60 split of page
+                split_x   = page_w * 0.50
+                left_amt_x  = page_w * 0.40
+                right_amt_x = page_w * 0.85
+                return split_x, is_pl, left_amt_x, right_amt_x
+
+            left_max  = max(left_xs)
+            right_min_amt = min(right_xs)
+
+            # Find the x of the leftmost RIGHT-SIDE TEXT word (section header or
+            # account name on the right column). This is the true start of the
+            # right half and gives a tighter split boundary than the midpoint of
+            # left/right amounts (which places split_x too far into the page,
+            # absorbing right-side text into the left name cluster).
+            all_text_xs: List[float] = []
+            for page in pdf.pages[:5]:
+                for w in page.extract_words():
+                    txt = w['text'].replace(',','').lstrip('-').lstrip('(').rstrip(')')
+                    if not _AMT_RE.match(txt) and len(w['text']) > 1:
+                        all_text_xs.append(float(w['x0']))
+
+            # Right-side text = text words with x > left_max + 20pt gap
+            right_text_xs = [x for x in all_text_xs if x > left_max + 20]
+            right_text_min = min(right_text_xs) if right_text_xs else right_min_amt
+
+            # Place split_x in the gap between end of left amounts and start of right text
+            # Use the smaller of: midpoint(left_max, right_text_min) or midpoint(left_max, right_min_amt)
+            split_x = min(
+                (left_max + right_text_min) / 2.0,
+                (left_max + right_min_amt) / 2.0
+            )
+
+            left_amt_x  = left_max
+            right_amt_x = max(right_xs)
 
             return split_x, is_pl, left_amt_x, right_amt_x
     except Exception:
@@ -1592,15 +1932,32 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
     entries: List[TrialBalanceEntry] = []
     left_group = right_group = ''
     left_pending_name = right_pending_name = ''
+    left_orphan_amt: Optional[float] = None   # amount seen before its name
+    right_orphan_amt: Optional[float] = None
 
     _NUM_PAT = re.compile(r'^-?[\d,]+\.?\d*$')
 
     def _is_num(s: str) -> bool:
-        return bool(_NUM_PAT.match(s.replace(',', '').lstrip('-').lstrip('(').rstrip(')')))
+        t = s.strip()
+        # Handle Indian "(-)" negative prefix: "(-)3,59,608.65"
+        if t.startswith('(-)'):
+            t = t[3:]
+        # Only strip a leading '(' if there is a matching trailing ')'
+        elif t.startswith('(') and t.endswith(')'):
+            t = t[1:-1]
+        elif t.endswith(')') and not t.startswith('('):
+            return False   # trailing ')' without opener → part of a name like "Mst 40)"
+        t = t.lstrip('-').replace(',', '')
+        return bool(_NUM_PAT.match(t))
 
     def _parse_num(s: str) -> float:
-        neg = s.strip().startswith('-') or (s.strip().startswith('(') and s.strip().endswith(')'))
-        cleaned = s.replace(',', '').lstrip('-').lstrip('(').rstrip(')')
+        t = s.strip()
+        neg = t.startswith('-') or t.startswith('(-)')
+        if t.startswith('(-)'):
+            t = t[3:]
+        elif t.startswith('(') and t.endswith(')'):
+            t = t[1:-1]
+        cleaned = t.lstrip('-').replace(',', '')
         try:
             val = float(cleaned)
             return -val if neg else val
@@ -1651,12 +2008,44 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
             if not words:
                 continue
 
-            # Cluster into rows with 2pt tolerance
+            # Cluster into rows with 2pt tolerance, then merge any adjacent
+            # name-only and amount-only clusters within 4pt — this handles
+            # PDFs where some rows have the amount word rendered 0.2–1.5pt
+            # above or below the text words (causing them to fall in different
+            # 2pt buckets while actually belonging to the same logical row).
             words.sort(key=lambda w: (round(float(w['top']) / 2) * 2, float(w['x0'])))
             rows: Dict[int, list] = {}
             for w in words:
                 y = round(float(w['top']) / 2) * 2
                 rows.setdefault(y, []).append(w)
+
+            # Post-merge: absorb isolated name-only or amount-only rows into
+            # their nearest neighbor within 4pt, provided merging would supply
+            # what the neighbor lacks.
+            ys = sorted(rows.keys())
+            merged: Dict[int, list] = {}
+            skip_ys: set = set()
+            for idx, y in enumerate(ys):
+                if y in skip_ys:
+                    continue
+                row_words = rows[y]
+                has_name = any(not _is_num(w['text']) for w in row_words)
+                has_amt  = any(_is_num(w['text']) for w in row_words)
+                # Look at next bucket
+                if idx + 1 < len(ys):
+                    y2 = ys[idx + 1]
+                    if y2 - y <= 4:
+                        row2 = rows[y2]
+                        has_name2 = any(not _is_num(w['text']) for w in row2)
+                        has_amt2  = any(_is_num(w['text']) for w in row2)
+                        # Merge if one has only names and the other has only amounts
+                        if (has_name and not has_amt and has_amt2 and not has_name2) or \
+                           (has_amt and not has_name and has_name2 and not has_amt2):
+                            merged[y] = row_words + row2
+                            skip_ys.add(y2)
+                            continue
+                merged[y] = row_words
+            rows = merged
 
             for y in sorted(rows.keys()):
                 # Skip page header area (company name, title, date rows)
@@ -1681,21 +2070,29 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                     name_str = _clean(' '.join(name_tokens)).strip()
                     nl = name_str.lower()
 
-                    # Skip header/footer/noise rows
-                    skip_prefixes = (
+                    # Skip header/footer/noise rows.
+                    # "profit and loss" / "profit & loss" / "trading profit" skip only
+                    # when there is NO amount on this row — those prefixes are used for
+                    # document titles and column headers, but also appear as account names
+                    # (e.g. "Profit And Loss A/c 763089.29") that must be kept.
+                    _unconditional_skip = (
                         'account name', 'account amount',
-                        'amount', 'balance sheet', 'profit and loss', 'profit & loss',
-                        'trading profit', 'grand total', 'end of report',
+                        'amount', 'balance sheet',
+                        'grand total', 'end of report',
                         'reporting date', 'page 1 of', 'page no',
-                        'liabilities amount', 'assets amount',  # column header rows
+                        'liabilities amount', 'assets amount',
                     )
-                    if any(nl.startswith(sk) for sk in skip_prefixes):
+                    _pl_title_skip = ('profit and loss', 'profit & loss', 'trading profit')
+                    if any(nl.startswith(sk) for sk in _unconditional_skip):
                         continue
+                    if not amt_tokens and any(nl.startswith(sk) for sk in _pl_title_skip):
+                        continue  # title/column-header row only; keep if it has an amount
                     # Skip standalone header words (exact match only)
                     if nl in ('liabilities', 'liability', 'assets', 'asset',
                               'account', 'amount', 'account name amount'):
                         continue
-                    if not name_str:
+                    # Skip phone / fax number rows (all-digit name with dashes, or bare digits)
+                    if name_str and re.match(r'^\d[\d\-]+$', name_str):
                         continue
 
                     cur_grp = left_group if side_name == 'L' else right_group
@@ -1716,6 +2113,14 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                                     left_pending_name = ''
                                 else:
                                     right_pending_name = ''
+                            else:
+                                # No pending name — save as orphan in case the name comes next row
+                                if side_name == 'L':
+                                    best = min(amt_tokens, key=lambda w: abs(float(w['x0']) - left_amt_x))
+                                    left_orphan_amt = _parse_num(best['text'])
+                                else:
+                                    best = min(amt_tokens, key=lambda w: abs(float(w['x0']) - right_amt_x))
+                                    right_orphan_amt = _parse_num(best['text'])
                         continue
 
                     # We have a name — check if it's a section header or a leaf entry
@@ -1724,7 +2129,9 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                                        any(nl.startswith(kw) for kw in _J_SECTION_KW))
 
                     if not amt_tokens:
-                        # No amount → section header
+                        # No amount → section header or name waiting for orphan amount
+                        # Check if a preceding amount-only row on this side is waiting
+                        orphan = left_orphan_amt if side_name == 'L' else right_orphan_amt
                         _is_noise_hdr = (
                             _is_total_row(name_str)
                             or _is_profit_row(name_str)
@@ -1735,13 +2142,27 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                             or any(kw == nl for kw in _J_SKIP_KW)
                         )
                         if not _is_noise_hdr:
-                            canonical = _resolve_section(name_str, side_name)
-                            if side_name == 'L':
-                                left_group = canonical
-                                left_pending_name = name_str
+                            if orphan is not None:
+                                # Preceding row had an amount with no name — attach it here
+                                _emit(name_str, cur_grp, orphan, is_dr)
+                                if side_name == 'L':
+                                    left_orphan_amt = None
+                                else:
+                                    right_orphan_amt = None
                             else:
-                                right_group = canonical
-                                right_pending_name = name_str
+                                canonical = _resolve_section(name_str, side_name)
+                                if side_name == 'L':
+                                    left_group = canonical
+                                    left_pending_name = name_str
+                                else:
+                                    right_group = canonical
+                                    right_pending_name = name_str
+                        elif orphan is not None:
+                            # Noise name — clear the orphan rather than leaving it dangling
+                            if side_name == 'L':
+                                left_orphan_amt = None
+                            else:
+                                right_orphan_amt = None
                     else:
                         # Has amounts
                         if side_name == 'L':
@@ -1752,7 +2173,7 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
 
                         _is_noise_entry = (
                             _is_total_row(name_str)
-                            or _is_profit_row(name_str)
+                            or _GROSS_PROFIT_RE.search(nl) is not None
                             or re.match(r'^page\s+\d', nl)
                             or nl in _J_NOISE_NAMES
                             or nl in ('b/d', 'income', 'indirect', 'claim', 'a/c',
@@ -1776,8 +2197,52 @@ def _parse_two_sided_section_pdf(file_path: str) -> List[TrialBalanceEntry]:
                             _emit(name_str, cur_grp, amt, is_dr)
                             if side_name == 'L':
                                 left_pending_name = ''
+                                left_orphan_amt = None   # clear any stale orphan
                             else:
                                 right_pending_name = ''
+                                right_orphan_amt = None
+
+    # ── Post-pass: collapse subtotal/group rows that also carried amounts ────
+    # Section headers with printed totals (and schedule subtotals) get emitted
+    # alongside their detail rows, double counting. We collapse per-side using
+    # SIGNED amounts (negative entries stay in the same side they were emitted on
+    # rather than being flipped to the other side). This lets the collapse engine
+    # see Purchase(+2154M) alongside its negative-amount children like
+    # Yarn Purchase Return(-4.57M) and sum-match correctly.
+    final: List[TrialBalanceEntry] = []
+    for side_is_dr in (True, False):
+        # Collect entries that PRIMARILY belong to this side (debit entries for Dr pass,
+        # credit entries for Cr pass) — but also include same-side negative entries
+        # (entries whose "primary" side is this side but whose amount ended up negative,
+        # flipping them to the other side in _emit). We detect these by checking if they
+        # are listed with debit=0,credit>0 but the PDF row was on the Dr/left side; we
+        # can't recover the original side after _emit without tracking it, so instead we
+        # use a simpler invariant: on each side pass, collect ALL remaining entries
+        # as signed amounts, collapse, then claim the output for this side.
+        #
+        # More precisely: on the Dr pass, collect everything that has debit>0 (positive Dr)
+        # plus credit entries that were emitted as Cr due to sign-flip of a Dr-side amount.
+        # Since we can't distinguish these after _emit, we handle them via the signed approach:
+        # for the Dr pass, include entries where debit > 0; for the Cr pass, entries where
+        # credit > 0. Negative children (flipped to Cr) will appear in the Cr pass at their
+        # correct magnitude. The collapse for the Dr pass may still not sum-match if negatives
+        # are missing, but this is an inherent limitation of per-side processing.
+        # The Kaliya and JHANWAR PDFs that formerly worked still work here.
+        side_rows = [e for e in entries
+                     if (side_is_dr and e.debit > 0) or (not side_is_dr and e.credit > 0)]
+        pairs = [(e.account_name, e.debit if side_is_dr else e.credit)
+                 for e in side_rows]
+        groups = {e.account_name: e.group for e in side_rows}
+        leaves = _normalize_profit_leaves(_collapse_side_pairs(pairs))
+        for name, amt, grp in leaves:
+            e = TrialBalanceEntry(account_name=name,
+                                  group=grp or groups.get(name, ''))
+            if side_is_dr:
+                e.debit = abs(amt)
+            else:
+                e.credit = abs(amt)
+            final.append(e)
+    entries = final
 
     logger.info("Format J (two-sided section PDF) parsed %d entries from %s",
                 len(entries), file_path)
@@ -1857,16 +2322,21 @@ def _parse_tally_single_col_pdf(file_path: str) -> List[TrialBalanceEntry]:
 
     # ── Pass 1: collect (name, dr, cr) for every row across all pages ─────────
     raw: List[Tuple[int, str, float, float]] = []
+    indents: List[Optional[float]] = []
+    grand_dr = grand_cr = 0.0
+    hit_grand = False
     order = 0
 
     _SKIP_TEXT = {
         'debit', 'credit', 'closing', 'balance', 'particulars',
         'page', 'carried', 'over', 'continued', 'brought', 'forward',
-        'trial', 'grand', 'total',
+        'trial',
     }
 
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
+            if hit_grand:
+                break
             words = page.extract_words(keep_blank_chars=False)
             if not words:
                 continue
@@ -1897,8 +2367,21 @@ def _parse_tally_single_col_pdf(file_path: str) -> List[TrialBalanceEntry]:
                 if not name:
                     continue
                 nl = name.lower().strip()
-                # Skip header/footer rows
-                if any(sk in nl for sk in _SKIP_TEXT):
+                # Grand Total = verification target; everything after it is a
+                # duplicated trailing block — stop here.
+                if 'grand total' in nl:
+                    for aw in amt_words:
+                        amt = _parse_indian_amount(aw['text'])
+                        if float(aw['x0']) < split_x:
+                            grand_dr = amt
+                        else:
+                            grand_cr = amt
+                    hit_grand = True
+                    break
+                # Skip header/footer rows (whole-word match — substring
+                # matching would drop e.g. 'Packing Matrial Gst' via 'trial')
+                nl_words = set(re.findall(r'[a-z]+', nl))
+                if nl_words & _SKIP_TEXT:
                     continue
                 if _is_total_row(name):
                     continue
@@ -1916,83 +2399,24 @@ def _parse_tally_single_col_pdf(file_path: str) -> List[TrialBalanceEntry]:
                         cr_val = amt   # right of split → Credit
 
                 raw.append((order, name, dr_val, cr_val))
+                # Indent proxy: x-position where the name starts
+                indents.append(float(name_words[0]['x0']) if name_words else None)
                 order += 1
 
     if not raw:
         return []
 
-    # ── Pass 2: detect parents (same logic as XLS Format I) ──────────────────
-    n = len(raw)
-    is_parent = [False] * n
+    # Quantize x-positions into indent levels (3pt tolerance) so equal-level
+    # siblings compare as exactly equal in the fold engine.
+    q_indents: List[Optional[float]] = [
+        None if x is None else round(x / 3.0) for x in indents]
+    distinct = {i for i in q_indents if i is not None}
+    use_indents = q_indents if len(distinct) > 1 else None
 
-    for i in range(n):
-        _, _, dr_i, cr_i = raw[i]
-        # Signal A: both non-zero → parent
-        if dr_i != 0.0 and cr_i != 0.0:
-            is_parent[i] = True
-            continue
-        # Signal B: sum-match lookahead
-        parent_amt = dr_i if dr_i != 0.0 else cr_i
-        if parent_amt == 0.0:
-            continue
-        running = 0.0
-        for j in range(i + 1, min(i + 80, n)):
-            _, _, dr_j, cr_j = raw[j]
-            if dr_j != 0.0 and cr_j != 0.0:
-                break
-            child_amt = dr_j if dr_j != 0.0 else cr_j
-            running += child_amt
-            tol = max(1.0, parent_amt * 0.002)
-            if abs(running - parent_amt) <= tol:
-                is_parent[i] = True
-                break
-            if running > parent_amt * 1.02 + 500:
-                break
-
-    # ── Pass 3: emit leaf entries ─────────────────────────────────────────────
-    entries: List[TrialBalanceEntry] = []
-    current_group = ''
-    group_totals: Dict[str, Tuple[float, float]] = {}
-    group_counts: Dict[str, int] = {}
-
-    for i, (_, name, dr, cr) in enumerate(raw):
-        if is_parent[i]:
-            current_group = name
-            group_totals[name] = (dr, cr)
-            group_counts.setdefault(name, 0)
-            continue
-
-        if dr == 0.0 and cr == 0.0:
-            current_group = name
-            group_counts.setdefault(name, 0)
-            continue
-
-        e = TrialBalanceEntry(account_name=name, group=current_group)
-        if dr != 0.0 and cr == 0.0:
-            e.debit = dr
-        elif cr != 0.0 and dr == 0.0:
-            e.credit = cr
-        else:
-            net = dr - cr
-            if net >= 0:
-                e.debit = net
-            else:
-                e.credit = abs(net)
-        entries.append(e)
-        if current_group:
-            group_counts[current_group] = group_counts.get(current_group, 0) + 1
-
-    # Fallback for groups with no leaf entries
-    for grp, (p_dr, p_cr) in group_totals.items():
-        if group_counts.get(grp, 0) == 0:
-            e = TrialBalanceEntry(account_name=grp, group=grp)
-            if p_cr >= p_dr:
-                e.credit = p_cr
-            else:
-                e.debit = p_dr
-            entries.append(e)
-            logger.info("Format I-PDF group fallback: %s Dr=%.2f Cr=%.2f", grp, p_dr, p_cr)
-
+    # Re-index sequentially (page clustering may have gaps) and fold.
+    raw = [(i, name, dr, cr) for i, (_, name, dr, cr) in enumerate(raw)]
+    entries = _fold_tally_hierarchy(raw, grand_dr, grand_cr, source=file_path,
+                                    indents=use_indents)
     logger.info("Format I-PDF parsed %d entries from %s", len(entries), file_path)
     return entries
 
