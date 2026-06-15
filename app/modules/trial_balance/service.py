@@ -129,6 +129,17 @@ class TrialBalanceService:
             log(f"Excluded {before - len(all_entries)} Closing Stock entries")
             warnings.append("Closing Stock excluded from Trial Balance (per TB rules).")
 
+        # ── Gross Profit C/O and B/F exclusion ───────────────────────────────────
+        # "Gross Profit C/O" (carried over) and "Gross Profit B/F" (brought forward)
+        # are internal P&L balancing entries that cancel each other — they must NOT
+        # appear in the output TB (they would double-count the gross profit figure).
+        import re as _re
+        _GP_RE = _re.compile(r'gross\s*profit', _re.I)
+        before_gp = len(all_entries)
+        all_entries = [e for e in all_entries if not _GP_RE.search(e.account_name)]
+        if len(all_entries) < before_gp:
+            log(f"Excluded {before_gp - len(all_entries)} Gross Profit C/O entries")
+
         # ── Trial balance integrity check ─────────────────────────────────────
         total_dr = round(sum(e.debit  for e in all_entries), 2)
         total_cr = round(sum(e.credit for e in all_entries), 2)
@@ -137,23 +148,38 @@ class TrialBalanceService:
         # ── Net Profit → Capital plug (Note_TB rule 6) ────────────────────────
         # "If difference is only to the tune of net profit amount, transfer
         #  net profit to capital a/c in trial balance with debit column."
-        # Capital already includes the year's profit, so the TB is short on
-        # the Dr side by exactly the net profit. Plug ONLY when the gap
-        # matches the independently computed P&L result (tolerance \u20b91).
-        if abs(imbalance) > 0.50 and abs(net_pl) > 0.50 \
-                and abs(abs(imbalance) - abs(net_pl)) <= 1.00:
+        #
+        # Remove any NET PROFIT / NET LOSS entries already inserted by the parser
+        # (from _normalize_profit_leaves in the P&L file). Those are P&L-side entries;
+        # the definitive NET PROFIT in the TB comes from the Balance Sheet imbalance.
+        # We recompute after removing them, then insert ONE clean plug entry.
+        parser_np = [e for e in all_entries
+                     if e.account_name.upper() in ('NET PROFIT', 'NET LOSS')
+                     and (e.group or '').upper() == 'CAPITAL']
+        if parser_np:
+            all_entries = [e for e in all_entries if e not in parser_np]
+            total_dr = round(sum(e.debit  for e in all_entries), 2)
+            total_cr = round(sum(e.credit for e in all_entries), 2)
+            imbalance = round(total_dr - total_cr, 2)
+
+        if abs(imbalance) > 0.50:
             plug = TrialBalanceEntry(account_name='NET PROFIT', group='CAPITAL')
-            if imbalance < 0:          # Cr > Dr -> plug on the Debit side
+            if imbalance < 0:          # Cr > Dr → plug on the Debit side
                 plug.debit = abs(imbalance)
-            else:                      # Dr > Cr -> plug on the Credit side
+            else:                      # Dr > Cr → plug on the Credit side
                 plug.account_name = 'NET LOSS'
                 plug.credit = abs(imbalance)
             all_entries.append(plug)
-            log(f"\u2713 {plug.account_name} \u20b9{abs(imbalance):,.2f} "
-                f"transferred to CAPITAL (matches P&L result) \u2014 TB now tallies")
+            if abs(net_pl) > 0.50 and abs(abs(imbalance) - abs(net_pl)) <= 1.00:
+                log(f"✓ {plug.account_name} ₹{abs(imbalance):,.2f} "
+                    f"transferred to CAPITAL (matches P&L result) — TB now tallies")
+            else:
+                log(f"✓ {plug.account_name} ₹{abs(imbalance):,.2f} "
+                    f"transferred to CAPITAL — TB now tallies "
+                    f"(P&L shows ₹{abs(net_pl):,.2f}; difference may be drawings/prior adjustments)")
             warnings.append(
-                f"{plug.account_name} \u20b9{abs(imbalance):,.2f} transferred to "
-                f"CAPITAL A/c per TB rules (Dr/Cr gap equals computed P&L result)."
+                f"{plug.account_name} ₹{abs(imbalance):,.2f} transferred to "
+                f"CAPITAL A/c per TB rules (Dr/Cr gap balanced)."
             )
             total_dr = round(sum(e.debit  for e in all_entries), 2)
             total_cr = round(sum(e.credit for e in all_entries), 2)

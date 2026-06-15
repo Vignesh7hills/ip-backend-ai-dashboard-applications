@@ -66,10 +66,24 @@ _PROFIT_ONLY_KW = {'gross profit', 'net profit', 'net loss'}
 _DOTS_RE   = re.compile(r'(\s*\.\s*){2,}')
 _NUM_RE    = re.compile(r'^-?[\d,]+\.?\d*$')
 _NAME_AMT_RE = re.compile(r'^(.+?)\s+([\-\(]?[\d,]+\.\d{2}[\)]?)\s*$')
+# Trailing "A/C", "A/c.", "Account" suffix — strip so "Brokerage A/c" → "Brokerage"
+_AC_SUFFIX_RE = re.compile(
+    r'\s+(a/c\.?|a/cs\.?|ac\.?|account|accounts)\s*$',
+    re.IGNORECASE,
+)
 
 
 def _clean(name: str) -> str:
-    return _DOTS_RE.sub('', name).strip()
+    """Clean an account/ledger name:
+    - Remove repeated dots (dot-leaders used as spacing in printed statements)
+    - Strip trailing A/C / Account suffix
+    - Strip trailing whitespace/punctuation
+    """
+    name = _DOTS_RE.sub('', name).strip()
+    name = _AC_SUFFIX_RE.sub('', name).strip()
+    # Remove isolated trailing dot or colon (common in printed statements)
+    name = re.sub(r'\s*[.:]\s*$', '', name).strip()
+    return name
 
 
 def _col_has(cell: str, keywords: List[str]) -> bool:
@@ -527,6 +541,9 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
     # YARN/CLOTH detail amounts live inside the name text, not the columns.
     for grp, total in left_group_totals.items():
         if left_group_counts.get(grp, 0) == 0 and total != 0.0:
+            # Skip internal P&L balancing entries (Gross Profit C/O, B/F)
+            if _GROSS_PROFIT_RE.search(grp):
+                continue
             e = TrialBalanceEntry(account_name=grp, group=grp)
             if is_pl:
                 e.debit  = abs(total) if total >= 0 else 0.0
@@ -540,6 +557,9 @@ def _parse_balance_sheet_format(df: pd.DataFrame) -> List[TrialBalanceEntry]:
 
     for grp, total in right_group_totals.items():
         if right_group_counts.get(grp, 0) == 0 and total != 0.0:
+            # Skip internal P&L balancing entries (Gross Profit C/O, B/F)
+            if _GROSS_PROFIT_RE.search(grp):
+                continue
             e = TrialBalanceEntry(account_name=grp, group=grp)
             if is_pl:
                 e.credit = total if total >= 0 else 0.0
@@ -1413,13 +1433,15 @@ def _parse_section_header_format(text: str) -> List[TrialBalanceEntry]:
 # is structurally a GROUP even when the export indents it at the same level
 # as its children (Tally does this for e.g. "Cash-in-hand" → "Cash").
 _TALLY_STD_GROUPS = {
-    'capital account', 'reserves & surplus', 'reserves and surplus',
+    'capital account', 'capital', 'capital a/c', 'capital ac',
+    'reserves & surplus', 'reserves and surplus',
     'loans (liability)', 'bank od a/c', 'bank occ a/c', 'secured loans',
     'unsecured loans', 'current liabilities', 'duties & taxes',
     'duties and taxes', 'provisions', 'sundry creditors',
     'fixed assets', 'investments', 'current assets', 'bank accounts',
     'cash-in-hand', 'cash in hand', 'deposits (asset)',
     'loans & advances (asset)', 'loans and advances (asset)',
+    'loans & advances', 'loans and advances',
     'stock-in-hand', 'stock in hand', 'sundry debtors',
     'branch / divisions', 'branch/divisions', 'misc. expenses (asset)',
     'misc expenses (asset)', 'suspense a/c', 'sales accounts',
@@ -1430,15 +1452,17 @@ _TALLY_STD_GROUPS = {
     # Common single-child group names found in Indian BS/P&L exports
     'purchase', 'purchases', 'purchase a/c', 'purchase ac',
     'sales', 'sale', 'sale a/c', 'sales a/c', 'sale ac',
-    'direct expenditure', 'direct expinditure', 'direct expinditure',
+    'direct expenditure', 'direct expinditure',
     'indirect expenditure', 'indirect expinditure',
     'indirect expences', 'indirect expenses', 'direct expences',
     'expenses direct', 'expenses indirect',
     'current assets', 'current liabilities', 'fixed assets',
     'loans liabilities', 'loans & borrowings', 'loans and borrowings',
-    'capital a/c', 'capital ac', 'sundry payables', 'sundry receivables',
+    'sundry payables', 'sundry receivables',
     'broker master', 'broker a/c',
     'other income', 'other expenses', 'other expenditure',
+    # Additional section names from PDF BS formats
+    'loans (liability)', 'loans(liability)',
 }
 
 
@@ -1751,7 +1775,9 @@ _J_SECTION_KW = {
     'sundry payables':                 'SUNDRY CREDITORS',
     'loans liabilities':               'UNSECURED LOANS',
     'loans & borrowings':              'UNSECURED LOANS',
+    'loans (liability)':               'UNSECURED LOANS',
     'unsecured loans':                 'UNSECURED LOANS',
+    'secured loans':                   'SECURED LOANS',
     # BS Right (Debit / Asset)
     'current assets':                  'OTHER CURRENT ASSETS',
     'current assests':                 'OTHER CURRENT ASSETS',
@@ -1761,6 +1787,9 @@ _J_SECTION_KW = {
     'loans / advances a/c':            'LOANS AND ADVANCES (ASSETS)',
     'loans and advances':              'LOANS AND ADVANCES (ASSETS)',
     'loans and advances a/c':          'LOANS AND ADVANCES (ASSETS)',
+    'loans & advances (asset)':        'LOANS AND ADVANCES (ASSETS)',
+    'loans and advances (asset)':      'LOANS AND ADVANCES (ASSETS)',
+    'suspense a/c':                    'OTHER CURRENT ASSETS',
     'sundry debtors':                  'SUNDRY DEBTORS',
     'sundry receivables':              'SUNDRY DEBTORS',
     'fixed assets':                    'FIXED ASSETS',
