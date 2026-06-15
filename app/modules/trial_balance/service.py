@@ -2,7 +2,7 @@
 import time
 from typing import List
 from app.utils.universal_parser import parse_for_trial_balance
-from app.modules.trial_balance.parser import TrialBalanceEntry, _filename_is_pl
+from app.modules.trial_balance.parser import TrialBalanceEntry
 from app.modules.trial_balance.validator import TrialBalanceValidator
 from app.modules.trial_balance.calculator import TrialBalanceCalculator, compute_pl_net_profit
 from app.modules.trial_balance.generator import TrialBalanceExcelGenerator
@@ -10,22 +10,6 @@ from app.core.logger import get_logger
 from app.core.exceptions import EmptyFileError
 
 logger = get_logger(__name__)
-
-
-def _filename_is_pl_or_pl_entries(fp: str, entries) -> bool:
-    """True when the file is detected as P&L by filename or when it has no BS groups."""
-    hint = _filename_is_pl(fp)
-    if hint is True:
-        return True
-    if hint is False:
-        return False
-    # hint is None — decide from entries: if CAPITAL / SUNDRY DEBTORS / FIXED ASSETS present → BS
-    bs_groups = {'capital', 'sundry debtors', 'fixed assets', 'bank a/c', 'cash in hand',
-                 'loans and advances', 'sundry creditors', 'unsecured loans', 'secured loans'}
-    groups_lower = {(e.group or '').lower() for e in entries}
-    if any(g in groups_lower for g in bs_groups):
-        return False
-    return True
 
 
 class TrialBalanceService:
@@ -58,7 +42,21 @@ class TrialBalanceService:
                 entries, parse_warnings = parse_for_trial_balance(fp)
                 warnings.extend(parse_warnings)
                 all_entries.extend(entries)
-                log(f"  {fname}: {len(entries)} entries")
+                f_dr = round(sum(e.debit for e in entries), 2)
+                f_cr = round(sum(e.credit for e in entries), 2)
+                log(f"  {fname}: {len(entries)} entries "
+                    f"(Dr \u20b9{f_dr:,.2f} / Cr \u20b9{f_cr:,.2f})")
+                # A published BS or P&L always balances internally; a per-file
+                # gap means extraction lost or double-counted rows — UNLESS the
+                # gap is the year's net profit (P&L files commonly omit it as a
+                # ledger line; the pipeline transfers it to CAPITAL later).
+                f_diff = round(f_dr - f_cr, 2)
+                if abs(f_diff) > 1.0:
+                    warnings.append(
+                        f"[{fname}] parsed Dr \u20b9{f_dr:,.2f} vs Cr \u20b9{f_cr:,.2f} "
+                        f"(difference \u20b9{abs(f_diff):,.2f}). If this is not the "
+                        f"net profit/loss for the year, please verify the file."
+                    )
             except Exception as exc:
                 warnings.append(f"[{fname}] could not be parsed: {exc}")
                 logger.warning("Failed: %s: %s", fname, exc)
@@ -84,15 +82,50 @@ class TrialBalanceService:
             )
 
         # ── Closing Stock exclusion (OUTPUT sheet only) ───────────────────────
-        has_closing = any(
-            'closing' in (e.group or '').lower() or 'closing' in e.account_name.lower()
-            for e in all_entries
-        )
+        # The client rule (Note_TB point 2): do NOT include Closing Stock in
+        # the TB output when it appears in the Balance Sheet or Trading Account.
+        #
+        # We filter at TWO levels:
+        # 1. Entry-level: remove entries whose name/group directly says "closing"
+        #    (catches the most common case: explicit Closing Stock entries).
+        # 2. After-calculator: the calculator maps some stock groups (e.g.
+        #    "Cloth Stock", "Yarn Stock" from a Format-C collapse) to
+        #    'CLOSING STOCK'. We run a second pass after computing groups to
+        #    strip any entry that ends up in the CLOSING STOCK group.
+        #
+        # Known stock account sub-names that are always Closing Stock (never
+        # Opening Stock) when seen on the Credit/Balance Sheet side:
+        _CLOSING_STOCK_NAMES = {
+            'cloth stock', 'yarn stock', 'stock in hand', 'stock-in-hand',
+            'closing stock', 'closing stock a/c', 'closing stock ac',
+        }
+
+        def _is_closing_stock_entry(e: TrialBalanceEntry) -> bool:
+            nm  = e.account_name.lower().strip()
+            grp = (e.group or '').lower().strip()
+            # Explicit "closing" keyword in name or group
+            if 'closing' in nm or 'closing' in grp:
+                return True
+            # Named stock-in-hand accounts that are always Closing Stock in a BS/TB.
+            # In the BS these appear as Dr (Current Assets), in the P&L as Cr.
+            # Either way they must be excluded per the client rule.
+            # We also check 'cloth stock' / 'stock in hand' type groups that the
+            # calculator maps to CLOSING STOCK internally.
+            _STOCK_GROUPS = {
+                'cloth stock', 'yarn stock', 'stock in hand', 'stock-in-hand',
+                'closing stock', 'closing stock a/c', 'closing stock ac',
+                'stock', 'stock a/c',
+            }
+            if nm in _STOCK_GROUPS or grp in _STOCK_GROUPS:
+                # Only exclude if it's NOT labelled as Opening Stock
+                if 'opening' not in nm and 'opening' not in grp:
+                    return True
+            return False
+
+        has_closing = any(_is_closing_stock_entry(e) for e in all_entries)
         if has_closing:
             before = len(all_entries)
-            all_entries = [e for e in all_entries
-                           if not ('closing' in (e.group or '').lower()
-                                   or 'closing' in e.account_name.lower())]
+            all_entries = [e for e in all_entries if not _is_closing_stock_entry(e)]
             log(f"Excluded {before - len(all_entries)} Closing Stock entries")
             warnings.append("Closing Stock excluded from Trial Balance (per TB rules).")
 
@@ -101,34 +134,30 @@ class TrialBalanceService:
         total_cr = round(sum(e.credit for e in all_entries), 2)
         imbalance = round(total_dr - total_cr, 2)
 
-        # ── Net Profit → Capital plug (TB rule: P&L must balance to CAPITAL) ──
-        # Rule: when ALL uploaded files are P&L (no BS), the imbalance IS the
-        # net profit/loss. Post it to CAPITAL to close the TB.
-        # Also fires when computed P&L net_pl matches the imbalance within 0.5%.
-        if abs(imbalance) > 0.50:
-            all_pl = all(_filename_is_pl_or_pl_entries(fp, all_entries) for fp in file_paths)
-            # Match: imbalance equals computed P&L result within 0.5%
-            tol = max(1.00, abs(net_pl) * 0.005)
-            exact_match = abs(net_pl) > 0.50 and abs(abs(imbalance) - abs(net_pl)) <= tol
-            plug_it = all_pl or exact_match
-
-            if plug_it:
-                plug = TrialBalanceEntry(account_name='NET PROFIT', group='CAPITAL')
-                if imbalance < 0:          # Cr > Dr → net profit → plug on Dr side
-                    plug.debit  = abs(imbalance)
-                else:                      # Dr > Cr → net loss   → plug on Cr side
-                    plug.account_name = 'NET LOSS'
-                    plug.credit = abs(imbalance)
-                all_entries.append(plug)
-                log(f"✓ {plug.account_name} ₹{abs(imbalance):,.2f} "
-                    f"transferred to CAPITAL — TB now tallies")
-                warnings.append(
-                    f"{plug.account_name} ₹{abs(imbalance):,.2f} transferred to "
-                    f"CAPITAL A/c per TB rules (Dr/Cr gap equals net P&L result)."
-                )
-                total_dr = round(sum(e.debit  for e in all_entries), 2)
-                total_cr = round(sum(e.credit for e in all_entries), 2)
-                imbalance = round(total_dr - total_cr, 2)
+        # ── Net Profit → Capital plug (Note_TB rule 6) ────────────────────────
+        # "If difference is only to the tune of net profit amount, transfer
+        #  net profit to capital a/c in trial balance with debit column."
+        # Capital already includes the year's profit, so the TB is short on
+        # the Dr side by exactly the net profit. Plug ONLY when the gap
+        # matches the independently computed P&L result (tolerance \u20b91).
+        if abs(imbalance) > 0.50 and abs(net_pl) > 0.50 \
+                and abs(abs(imbalance) - abs(net_pl)) <= 1.00:
+            plug = TrialBalanceEntry(account_name='NET PROFIT', group='CAPITAL')
+            if imbalance < 0:          # Cr > Dr -> plug on the Debit side
+                plug.debit = abs(imbalance)
+            else:                      # Dr > Cr -> plug on the Credit side
+                plug.account_name = 'NET LOSS'
+                plug.credit = abs(imbalance)
+            all_entries.append(plug)
+            log(f"\u2713 {plug.account_name} \u20b9{abs(imbalance):,.2f} "
+                f"transferred to CAPITAL (matches P&L result) \u2014 TB now tallies")
+            warnings.append(
+                f"{plug.account_name} \u20b9{abs(imbalance):,.2f} transferred to "
+                f"CAPITAL A/c per TB rules (Dr/Cr gap equals computed P&L result)."
+            )
+            total_dr = round(sum(e.debit  for e in all_entries), 2)
+            total_cr = round(sum(e.credit for e in all_entries), 2)
+            imbalance = round(total_dr - total_cr, 2)
 
         if abs(imbalance) > 0.50:
             msg = (
