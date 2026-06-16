@@ -560,6 +560,8 @@ _KEYWORD_MAP = [
      'COMPENSATION TO EMPLOYEES'),
     (['interest received', 'late payment interest', 'interest income'],
      'INTEREST RECEIVED'),
+    (['interest on late payment', 'interest on overdue', 'interest on delayed payment'],
+     'INTEREST PAID'),
     (['interest payable', 'interest accrued', 'interest outstanding'],
      'PROVISIONS'),
     (['interest on income tax', 'interest on tds', 'interest on late payment'],
@@ -733,11 +735,23 @@ def _normalise(group: str, account_name: str = '') -> str:
     }
     grp_upper = (group or '').strip().upper()
 
+    # Income groups — entries here should only move to more specific income groups,
+    # not be re-classified as expenses.
+    _INCOME_GROUPS = {'INDIRECT INCOMES', 'OTHER INCOMES', 'DIRECT INCOMES', 'SALES A/C'}
+    _EXPENSE_GROUPS = {'INDIRECT EXPENSES', 'OTHER EXPENSES', 'DIRECT EXPENSES (M)',
+                       'MANUFACTURING EXPENSES', 'REPAIR & MAINTENANCE'}
+
     # 0) For generic groups, try account name first for a specific match.
     if grp_upper in _GENERIC_OVERRIDE_GROUPS and account_name:
         name_match = _match(account_name)
         if name_match and name_match not in _GENERIC_OVERRIDE_GROUPS:
-            return name_match
+            # Don't let an income-group entry be classified as an expense and vice versa
+            if grp_upper in _INCOME_GROUPS and name_match in _EXPENSE_GROUPS:
+                pass  # keep looking — don't downgrade income to expense
+            elif grp_upper in _EXPENSE_GROUPS and name_match in _INCOME_GROUPS:
+                pass  # keep looking — don't upgrade expense to income
+            else:
+                return name_match
 
     # 0b) For "soft override" groups (SUNDRY DEBTORS, CASH AND BANK, CASH IN HAND), check if the
     #     account name signals a different more-specific group. Only override when
