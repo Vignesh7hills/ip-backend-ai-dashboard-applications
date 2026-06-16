@@ -745,11 +745,18 @@ def _normalise(group: str, account_name: str = '') -> str:
     if grp_upper in _GENERIC_OVERRIDE_GROUPS and account_name:
         name_match = _match(account_name)
         if name_match and name_match not in _GENERIC_OVERRIDE_GROUPS:
-            # Don't let an income-group entry be classified as an expense and vice versa
+            # Check if the match came from an exact alias (deliberate mapping).
+            _akey = account_name.strip().lower()
+            _is_exact_alias = _akey in _ALIASES or _akey in _MASTER_LEDGER_MAP
+            # Cross-protection: don't let income entries become expenses or vice versa.
+            # Exact alias bypasses protection ONLY when the alias moves an entry TO income
+            # (i.e. corrects a wrong expense context for an income account like Rate Difference).
+            # It does NOT bypass when the alias would downgrade an income entry to expense
+            # (i.e. we trust the parser's income-group assignment over an expense alias).
             if grp_upper in _INCOME_GROUPS and name_match in _EXPENSE_GROUPS:
-                pass  # keep looking — don't downgrade income to expense
-            elif grp_upper in _EXPENSE_GROUPS and name_match in _INCOME_GROUPS:
-                pass  # keep looking — don't upgrade expense to income
+                pass  # never downgrade income to expense, even with exact alias
+            elif grp_upper in _EXPENSE_GROUPS and name_match in _INCOME_GROUPS and not _is_exact_alias:
+                pass  # don't upgrade expense to income unless it's an explicit alias
             else:
                 return name_match
 
