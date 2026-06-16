@@ -94,7 +94,8 @@ _ALIASES: Dict[str, str] = {
 
     # Provisions / Duties & Taxes
     'provisions':                      'PROVISIONS',
-    'duties and taxes':                'PROVISIONS',
+    'duties and taxes':                'DUTIES AND TAXES',
+    'duties & taxes':                  'DUTIES AND TAXES',
     'duty and taxes':                  'DUTIES AND TAXES',
     'duty & taxes':                    'DUTIES AND TAXES',
     # Expenditure / Expense group names (common misspellings)
@@ -333,10 +334,41 @@ _ALIASES: Dict[str, str] = {
     # Broker / commission agents → Sundry Creditors
     'broker':                          'SUNDRY CREDITORS',
     'broker master':                   'SUNDRY CREDITORS',
+    # Interest received (income)
+    'late payment interest':           'INTEREST RECEIVED',
+    'interest received':               'INTEREST RECEIVED',
+    'interest received a/c':           'INTEREST RECEIVED',
     # Postage → OTHER EXPENSES (not TELEPHONE)
     'postage & courier':               'OTHER EXPENSES',
     'postage and courier':             'OTHER EXPENSES',
     'postage':                         'OTHER EXPENSES',
+    # Misc indirect expenses → OTHER EXPENSES
+    'c c renewal charges':             'OTHER EXPENSES',
+    'cc renewal charges':              'OTHER EXPENSES',
+    'renewal charges':                 'OTHER EXPENSES',
+    'google workspace':                'OTHER EXPENSES',
+    'rewinding charges':               'OTHER EXPENSES',
+    'rewinding exp':                   'OTHER EXPENSES',
+    'sundry debtors write-off':        'INDIRECT EXPENSES',
+    'sundry debtor write off':         'INDIRECT EXPENSES',
+    # TDS Receivable / Advance Tax → BALANCE WITH REVENUE AUTHORITY
+    't. d. s. receivable':             'BALANCE WITH REVENUE AUTHORITY',
+    'tds receivable':                  'BALANCE WITH REVENUE AUTHORITY',
+    'tds recivable':                   'BALANCE WITH REVENUE AUTHORITY',
+    'tcs receivable':                  'BALANCE WITH REVENUE AUTHORITY',
+    'advance tax':                     'BALANCE WITH REVENUE AUTHORITY',
+    'advance income tax':              'BALANCE WITH REVENUE AUTHORITY',
+    # Pre-paid Expenses → OTHER CURRENT ASSETS (asset, not PROVISIONS)
+    'pre-paid expenses':               'OTHER CURRENT ASSETS',
+    'prepaid expenses':                'OTHER CURRENT ASSETS',
+    'pre paid expenses':               'OTHER CURRENT ASSETS',
+    # Write-offs → INDIRECT EXPENSES
+    'sundry debtors write-off':        'INDIRECT EXPENSES',
+    'bad debts written off':           'INDIRECT EXPENSES',
+    # Interest payable → PROVISIONS
+    'interest ( bank ) payable':       'PROVISIONS',
+    'interest payable':                'PROVISIONS',
+    'interest accrued':                'PROVISIONS',
     # Ganesh → CAPITAL (deity-named proprietor capital account)
     'shri ganeshji maharaj':           'CAPITAL',
     'ganeshji maharaj':                'CAPITAL',
@@ -368,8 +400,7 @@ _ALIASES: Dict[str, str] = {
     'mobile recharge':                 'TELEPHONE',
     'telephone':                       'TELEPHONE',
     'telephone expenses':              'TELEPHONE',
-    'postage & courier':               'TELEPHONE',
-    'postage and courier':             'TELEPHONE',
+    'postage':                         'OTHER EXPENSES',
     # Freight / transport
     'transport exp.':                  'FREIGHT',
     'transport charges':               'FREIGHT',
@@ -469,6 +500,8 @@ _ALIASES: Dict[str, str] = {
     'travelling':                      'TRAVELLING',
     'conveyance':                      'CONVEYANCE',
     'rent':                            'RENT',
+    'godown rent':                     'RENT',
+    'office rent':                     'RENT',
     'rates and taxes':                 'RATES AND TAXES',
     'power and fuel':                  'POWER AND FUEL',
     'power and fuel (m)':              'POWER AND FUEL (M)',
@@ -525,15 +558,21 @@ _KEYWORD_MAP = [
      'COMMISSION PAID'),
     (['salary', 'salaries', 'bonus', 'remuneration to partner'],
      'COMPENSATION TO EMPLOYEES'),
-    (['interest received'],
+    (['interest received', 'late payment interest', 'interest income'],
      'INTEREST RECEIVED'),
+    (['interest payable', 'interest accrued', 'interest outstanding'],
+     'PROVISIONS'),
+    (['interest on income tax', 'interest on tds', 'interest on late payment'],
+     'INDIRECT EXPENSES'),
+    (['interest paid - partner', 'interest paid to partner'],
+     'INTEREST PAID'),
     (['interest'],
      'INTEREST PAID'),
     (['travelling', 'travel exp'],
      'TRAVELLING'),
     (['vehicle exp', 'conveyance'],
      'CONVEYANCE'),
-    (['mobile', 'telephone', 'postage'],
+    (['mobile', 'telephone'],
      'TELEPHONE'),
     (['electricity', 'light bill', 'power and fuel', 'power & fuel'],
      'POWER AND FUEL'),
@@ -545,7 +584,7 @@ _KEYWORD_MAP = [
      'RATES AND TAXES'),
     (['donation'],
      'DONATION'),
-    (['rent'],
+    (['godown rent', 'office rent', 'rent a/c', 'rent paid', 'rent charges'],
      'RENT'),
     (['bank charge', 'bank commission', 'bank renewal', 'bank audit'],
      'COMMISSION PAID'),
@@ -685,6 +724,13 @@ def _normalise(group: str, account_name: str = '') -> str:
         'INDIRECT EXPENSES', 'INDIRECT INCOMES', 'PROVISIONS',
         'DUTIES AND TAXES', 'OTHER CURRENT ASSETS', 'UNGROUPED', '',
     }
+    # Groups where the account name might carry better classification signal:
+    # SUNDRY DEBTORS section can contain TDS Receivable, Advance Tax (→ BALANCE WITH REVENUE AUTHORITY)
+    # or Sundry Debtors Write-off (→ INDIRECT EXPENSES)
+    _SOFT_OVERRIDE_GROUPS = {
+        'SUNDRY DEBTORS', 'CASH AND BANK', 'CASH IN HAND',
+        'CASH & BANK BALANCES', 'CASH AND BANK BALANCES',
+    }
     grp_upper = (group or '').strip().upper()
 
     # 0) For generic groups, try account name first for a specific match.
@@ -692,6 +738,29 @@ def _normalise(group: str, account_name: str = '') -> str:
         name_match = _match(account_name)
         if name_match and name_match not in _GENERIC_OVERRIDE_GROUPS:
             return name_match
+
+    # 0b) For "soft override" groups (SUNDRY DEBTORS, CASH AND BANK, CASH IN HAND), check if the
+    #     account name signals a different more-specific group. Only override when
+    #     the match is clearly NOT a party name (i.e. it's a tax/system account).
+    if grp_upper in _SOFT_OVERRIDE_GROUPS and account_name:
+        akey_soft = account_name.strip().lower()
+        name_match = _match(account_name)
+        _PARTY_GROUPS = {'SUNDRY CREDITORS', 'SUNDRY DEBTORS', 'CAPITAL',
+                         'UNSECURED LOANS', 'SECURED LOANS', 'UNGROUPED'}
+        if name_match and name_match not in _PARTY_GROUPS and name_match not in _GENERIC_OVERRIDE_GROUPS:
+            return name_match
+        # Bank account heuristic (HDFC, ICICI etc. are CASH AND BANK not CASH IN HAND)
+        if any(b in akey_soft for b in ('bank ltd', 'bank limited', ' bank', 'hdfc', 'icici',
+                                         'sbi', 'axis bank', 'kotak', 'yes bank', 'ubi',
+                                         'union bank', 'state bank', 'canara', 'pnb',
+                                         'punjab national', 'idbi', 'indusind')):
+            if any(x in akey_soft for x in ('od', 'occ', 'overdraft', 'cc a/c', 'cash credit')):
+                return 'SECURED LOANS'
+            return 'CASH AND BANK'
+        # Loans/Advances entries mistakenly under CASH IN HAND
+        if grp_upper == 'CASH IN HAND' and any(k in akey_soft for k in
+                ('as per schedule', 'loan', 'advance', 'mills', 'corporation', 'm/s')):
+            return 'LOANS AND ADVANCES (ASSETS)'
 
     # 1) Trust an explicit, recognised Group column first.
     matched = _match(group)
